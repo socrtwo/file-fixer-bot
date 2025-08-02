@@ -8,33 +8,58 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 250 100% 99%;
+    --foreground: 215 25% 15%;
 
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 215 25% 15%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover-foreground: 215 25% 15%;
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    --primary: 215 100% 50%;
+    --primary-foreground: 0 0% 100%;
+    --primary-glow: 215 100% 60%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 215 20% 95%;
+    --secondary-foreground: 215 25% 15%;
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 215 20% 96%;
+    --muted-foreground: 215 15% 45%;
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent: 140 50% 50%;
+    --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 85% 60%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
+    --border: 215 20% 90%;
+    --input: 215 20% 94%;
+    --ring: 215 100% 50%;
+
+    /* Success colors for repair status */
+    --success: 140 70% 45%;
+    --success-foreground: 0 0% 100%;
+    --success-light: 140 50% 95%;
+
+    /* Warning colors */
+    --warning: 45 100% 50%;
+    --warning-foreground: 0 0% 100%;
+    --warning-light: 45 100% 95%;
+
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary-glow)));
+    --gradient-surface: linear-gradient(180deg, hsl(var(--background)), hsl(var(--muted)));
+    --gradient-card: linear-gradient(135deg, hsl(var(--card)), hsl(var(--secondary)));
+
+    /* Shadows */
+    --shadow-soft: 0 4px 20px -4px hsl(var(--primary) / 0.1);
+    --shadow-medium: 0 8px 30px -8px hsl(var(--primary) / 0.15);
+    --shadow-strong: 0 20px 40px -12px hsl(var(--primary) / 0.25);
+
+    /* Animations */
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-bounce: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
 
     --radius: 0.5rem;
 

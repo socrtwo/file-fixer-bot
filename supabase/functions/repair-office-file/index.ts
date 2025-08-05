@@ -674,111 +674,102 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
           // Try alternative decompression methods first
           let extractedText = '';
           
-          // Try gzip decompression (sometimes ZIP files have different compression)
-          try {
-            const gzipStream = new ReadableStream({
-              start(controller) {
-                controller.enqueue(compressedData);
-                controller.close();
+          // Try raw deflate with different starting positions (corrupted header)
+          for (let offset = 0; offset < Math.min(20, compressedData.length); offset++) {
+            try {
+              const truncatedData = compressedData.slice(offset);
+              const stream = new ReadableStream({
+                start(controller) {
+                  controller.enqueue(truncatedData);
+                  controller.close();
+                }
+              });
+              const decompressedStream = stream.pipeThrough(new DecompressionStream('deflate-raw'));
+              const response = new Response(decompressedStream);
+              const decompressedBuffer = await response.arrayBuffer();
+              const xmlText = new TextDecoder('utf-8', { fatal: false }).decode(decompressedBuffer);
+              
+              // Check if this looks like valid XML
+              if (xmlText.includes('<?xml') || xmlText.includes('<w:')) {
+                fileData = new Uint8Array(decompressedBuffer);
+                console.log(`Successfully decompressed ${filename} with deflate-raw at offset ${offset}: ${truncatedData.length} -> ${fileData.length} bytes`);
+                decompressed = true;
+                break;
               }
-            });
-            const decompressedGzip = gzipStream.pipeThrough(new DecompressionStream('gzip'));
-            const responseGzip = new Response(decompressedGzip);
-            const decompressedBuffer = await responseGzip.arrayBuffer();
-            const xmlText = new TextDecoder('utf-8', { fatal: false }).decode(decompressedBuffer);
-            
-            // Check if this looks like valid XML
-            if (xmlText.includes('<?xml') || xmlText.includes('<w:')) {
-              fileData = new Uint8Array(decompressedBuffer);
-              console.log(`Successfully decompressed ${filename} with gzip: ${compressedData.length} -> ${fileData.length} bytes`);
-              decompressed = true;
+            } catch (offsetError) {
+              // Continue trying next offset
             }
-          } catch (gzipError) {
-            console.log(`Gzip failed for ${filename}:`, gzipError.message);
           }
           
-          // If inflate didn't work, try to find readable text in a smarter way
+          // Try looking for multiple deflate streams in the data
           if (!decompressed) {
             try {
-              // Convert to string and look for actual readable sentences
-              const textDecoder = new TextDecoder('utf-8', { fatal: false });
-              const rawText = textDecoder.decode(compressedData);
+              // Look for deflate stream signatures in the data
+              const deflateSignatures = [0x78, 0x9C, 0x78, 0xDA, 0x78, 0x01]; // Common zlib headers
               
-              // Look for sequences of actual words (3+ letters, with spaces)
-              const wordPattern = /\b[a-zA-Z]{3,}(?:\s+[a-zA-Z]{2,})*\b/g;
-              const sentences = rawText.match(wordPattern);
-              
-              if (sentences && sentences.length > 0) {
-                // Join sentences that seem to be actual text
-                extractedText = sentences
-                  .filter(sentence => {
-                    // Filter out sequences that are mostly special characters
-                    const letterCount = (sentence.match(/[a-zA-Z]/g) || []).length;
-                    const totalLength = sentence.length;
-                    return letterCount / totalLength > 0.7; // At least 70% letters
-                  })
-                  .join('. ')
-                  .trim();
-                  
-                // Clean up the text
-                if (extractedText.length > 10) {
-                  extractedText = extractedText
-                    .replace(/\s+/g, ' ') // Multiple spaces to single space
-                    .replace(/[^\w\s.,!?;:()\-'"]/g, '') // Remove weird characters
-                    .trim();
-                }
-              }
-              
-              // If no good text found, look for any XML content patterns
-              if (!extractedText) {
-                const xmlPattern = /<w:t[^>]*>([^<]+)<\/w:t>/g;
-                let match;
-                const textParts = [];
-                
-                while ((match = xmlPattern.exec(rawText)) !== null) {
-                  const text = match[1].trim();
-                  if (text.length > 2 && /[a-zA-Z]/.test(text)) {
-                    textParts.push(text);
+              for (let i = 0; i < compressedData.length - 10; i++) {
+                for (let j = 0; j < deflateSignatures.length; j += 2) {
+                  if (compressedData[i] === deflateSignatures[j] && compressedData[i + 1] === deflateSignatures[j + 1]) {
+                    try {
+                      const deflateData = compressedData.slice(i);
+                      const stream = new ReadableStream({
+                        start(controller) {
+                          controller.enqueue(deflateData);
+                          controller.close();
+                        }
+                      });
+                      const decompressedStream = stream.pipeThrough(new DecompressionStream('deflate'));
+                      const response = new Response(decompressedStream);
+                      const decompressedBuffer = await response.arrayBuffer();
+                      const xmlText = new TextDecoder('utf-8', { fatal: false }).decode(decompressedBuffer);
+                      
+                      if (xmlText.includes('<?xml') || xmlText.includes('<w:')) {
+                        fileData = new Uint8Array(decompressedBuffer);
+                        console.log(`Successfully decompressed ${filename} with deflate signature at position ${i}: ${deflateData.length} -> ${fileData.length} bytes`);
+                        decompressed = true;
+                        break;
+                      }
+                    } catch (sigError) {
+                      // Continue searching
+                    }
                   }
                 }
-                
-                if (textParts.length > 0) {
-                  extractedText = textParts.join(' ');
-                }
+                if (decompressed) break;
               }
-            } catch (textError) {
-              console.log(`Text extraction failed for ${filename}:`, textError.message);
+            } catch (streamError) {
+              console.log(`Stream search failed for ${filename}:`, streamError.message);
             }
           }
           
-          // Create appropriate XML content based on filename
-          let xmlContent = '';
-          if (filename === 'word/document.xml') {
-            const documentText = extractedText || 'Document content could not be recovered due to compression corruption.';
-            xmlContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          // If all advanced methods failed, create minimal XML content
+          if (!decompressed) {
+            console.log(`All decompression methods failed for ${filename}, creating minimal XML replacement`);
+            
+            // Create appropriate XML content based on filename  
+            let xmlContent = '';
+            if (filename === 'word/document.xml') {
+              xmlContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <w:body>
     <w:p>
       <w:r>
-        <w:t>${documentText}</w:t>
+        <w:t>Document content could not be recovered due to severe corruption. Please check the original file.</w:t>
       </w:r>
     </w:p>
   </w:body>
 </w:document>`;
-          } else {
-            // Generic XML for other files
-            xmlContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            } else {
+              // Generic XML for other files
+              xmlContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <root>
   <!-- File ${filename} recovered with minimal content -->
 </root>`;
+            }
+            
+            fileData = new TextEncoder().encode(xmlContent);
+            console.log(`Created minimal XML replacement for ${filename}: ${fileData.length} bytes`);
+            decompressed = true;
           }
-          
-          fileData = new TextEncoder().encode(xmlContent);
-          console.log(`Created replacement XML content for ${filename}: ${fileData.length} bytes`);
-          if (extractedText) {
-            console.log(`Extracted text: ${extractedText.substring(0, 100)}...`);
-          }
-          decompressed = true;
         }
         
         if (!decompressed) {

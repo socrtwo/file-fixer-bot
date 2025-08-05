@@ -196,9 +196,10 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
   try {
     const JSZip = (await import('https://esm.sh/jszip@3.10.1')).default;
     
-    // Try to load as ZIP with more lenient options for corrupted files
+    // Try multiple approaches to load the ZIP
     let zip;
     try {
+      // Most lenient loading options
       zip = await JSZip.loadAsync(data, { 
         checkCRC32: false, 
         optimizedBinaryString: false,
@@ -207,95 +208,78 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
           return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
         }
       });
+      console.log('ZIP loaded successfully');
     } catch (e) {
-      console.log('ZIP load failed completely:', e.message);
-      return '';
+      console.log('Standard ZIP load failed, trying binary repair...', e.message);
+      
+      // Try to find and repair the ZIP structure manually
+      const repaired = await repairZipData(data);
+      if (repaired) {
+        zip = await JSZip.loadAsync(repaired, { 
+          checkCRC32: false, 
+          optimizedBinaryString: false,
+          createFolders: false 
+        });
+        console.log('ZIP loaded after manual repair');
+      } else {
+        throw new Error('ZIP repair failed');
+      }
     }
     
-    console.log('ZIP structure loaded for repair');
     const files = Object.keys(zip.files);
-    console.log(`Document contains ${files.length} internal files:`, files);
+    console.log(`Document contains ${files.length} internal files:`, files.slice(0, 5));
     
     let repairedContent = '';
     
-    // Extract content from Word documents
+    // Extract from Word documents with multiple fallbacks
     if (zip.files['word/document.xml']) {
-      console.log('Found Word document content');
+      console.log('Found Word document content file');
+      repairedContent = await extractWordContent(zip.files['word/document.xml']);
+      if (repairedContent.length > 100) {
+        console.log(`Successfully extracted ${repairedContent.length} characters from Word document`);
+        return repairedContent;
+      }
+    }
+    
+    // Try other XML files in word directory
+    const wordFiles = files.filter(f => f.startsWith('word/') && f.endsWith('.xml'));
+    for (const filename of wordFiles) {
       try {
-        const docXml = await zip.files['word/document.xml'].async('text');
-        console.log('Word document XML loaded, length:', docXml.length);
-        const textContent = extractTextFromXml(docXml);
-        if (textContent.length > 50) {
-          repairedContent = textContent;
-          console.log(`Extracted ${textContent.length} characters from Word document`);
+        const content = await extractWordContent(zip.files[filename]);
+        if (content.length > 100) {
+          repairedContent += content + '\n\n';
         }
       } catch (e) {
-        console.log('Failed to extract Word content, trying binary mode:', e.message);
-        try {
-          const docData = await zip.files['word/document.xml'].async('uint8array');
-          const docXml = new TextDecoder('utf-8', { fatal: false }).decode(docData);
-          const textContent = extractTextFromXml(docXml);
-          if (textContent.length > 50) {
-            repairedContent = textContent;
-            console.log(`Extracted ${textContent.length} characters from Word document (binary mode)`);
-          }
-        } catch (e2) {
-          console.log('Binary mode also failed:', e2.message);
-        }
+        console.log(`Failed to extract from ${filename}:`, e.message);
       }
     }
     
-    // Extract content from Excel documents
-    if (!repairedContent && Object.keys(zip.files).some(f => f.startsWith('xl/worksheets/'))) {
-      console.log('Found Excel worksheet content');
-      for (const filename of Object.keys(zip.files)) {
-        if (filename.startsWith('xl/worksheets/') && filename.endsWith('.xml')) {
-          try {
-            const sheetXml = await zip.files[filename].async('text');
-            const textContent = extractTextFromXml(sheetXml);
-            if (textContent.length > 50) {
-              repairedContent += textContent + '\n\n';
-            }
-          } catch (e) {
-            console.log(`Failed to extract from ${filename}:`, e.message);
-          }
-        }
-      }
-    }
-    
-    // Extract content from PowerPoint documents
-    if (!repairedContent && Object.keys(zip.files).some(f => f.startsWith('ppt/slides/'))) {
-      console.log('Found PowerPoint slide content');
-      for (const filename of Object.keys(zip.files)) {
-        if (filename.startsWith('ppt/slides/') && filename.endsWith('.xml')) {
-          try {
-            const slideXml = await zip.files[filename].async('text');
-            const textContent = extractTextFromXml(slideXml);
-            if (textContent.length > 50) {
-              repairedContent += textContent + '\n\n';
-            }
-          } catch (e) {
-            console.log(`Failed to extract from ${filename}:`, e.message);
-          }
-        }
-      }
-    }
-    
-    // If main content extraction failed, try any XML files with more aggressive extraction
+    // Excel extraction
     if (!repairedContent) {
-      console.log('Main content extraction failed, trying all XML files...');
-      for (const filename of files) {
-        if (filename.endsWith('.xml') && !zip.files[filename].dir) {
-          try {
-            const content = await zip.files[filename].async('text');
-            const textContent = extractTextFromXml(content);
-            if (textContent.length > 100) {
-              repairedContent += textContent + '\n\n';
-              console.log(`Extracted content from ${filename}: ${textContent.length} chars`);
-            }
-          } catch (e) {
-            console.log(`Could not read ${filename}:`, e.message);
+      const excelFiles = files.filter(f => f.startsWith('xl/worksheets/') && f.endsWith('.xml'));
+      for (const filename of excelFiles) {
+        try {
+          const content = await extractExcelContent(zip.files[filename]);
+          if (content.length > 50) {
+            repairedContent += content + '\n\n';
           }
+        } catch (e) {
+          console.log(`Failed to extract Excel from ${filename}:`, e.message);
+        }
+      }
+    }
+    
+    // PowerPoint extraction
+    if (!repairedContent) {
+      const pptFiles = files.filter(f => f.startsWith('ppt/slides/') && f.endsWith('.xml'));
+      for (const filename of pptFiles) {
+        try {
+          const content = await extractPowerPointContent(zip.files[filename]);
+          if (content.length > 50) {
+            repairedContent += content + '\n\n';
+          }
+        } catch (e) {
+          console.log(`Failed to extract PowerPoint from ${filename}:`, e.message);
         }
       }
     }
@@ -305,6 +289,74 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
   } catch (error) {
     console.log('Office document repair failed:', error.message);
     return '';
+  }
+}
+
+// Helper function to repair ZIP data structure
+async function repairZipData(data: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    // Look for ZIP signature and try to fix common corruption issues
+    const signature = new Uint8Array([0x50, 0x4B, 0x03, 0x04]); // PK signature
+    
+    // Find the start of the ZIP file
+    let zipStart = -1;
+    for (let i = 0; i < Math.min(data.length, 1000); i++) {
+      if (data[i] === signature[0] && 
+          data[i + 1] === signature[1] && 
+          data[i + 2] === signature[2] && 
+          data[i + 3] === signature[3]) {
+        zipStart = i;
+        break;
+      }
+    }
+    
+    if (zipStart > 0) {
+      console.log(`Found ZIP signature at offset ${zipStart}, trimming`);
+      return data.slice(zipStart);
+    }
+    
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Helper function to extract content from Word XML files
+async function extractWordContent(file: any): Promise<string> {
+  try {
+    let xmlContent;
+    try {
+      xmlContent = await file.async('text');
+    } catch (e) {
+      // Try binary mode if text mode fails
+      const data = await file.async('uint8array');
+      xmlContent = new TextDecoder('utf-8', { fatal: false }).decode(data);
+    }
+    
+    console.log(`Processing Word XML, length: ${xmlContent.length}`);
+    return extractTextFromWordXml(xmlContent);
+  } catch (e) {
+    throw e;
+  }
+}
+
+// Helper function to extract content from Excel XML files
+async function extractExcelContent(file: any): Promise<string> {
+  try {
+    const xmlContent = await file.async('text');
+    return extractTextFromExcelXml(xmlContent);
+  } catch (e) {
+    throw e;
+  }
+}
+
+// Helper function to extract content from PowerPoint XML files
+async function extractPowerPointContent(file: any): Promise<string> {
+  try {
+    const xmlContent = await file.async('text');
+    return extractTextFromPowerPointXml(xmlContent);
+  } catch (e) {
+    throw e;
   }
 }
 
@@ -441,4 +493,76 @@ function extractTextFromXml(xmlContent: string): string {
     console.error('XML text extraction error:', error);
     return '';
   }
+}
+
+// Specific function to extract text from Word XML
+function extractTextFromWordXml(xmlContent: string): string {
+  console.log('Extracting from Word XML...');
+  
+  // Look for Word text content in <w:t> tags
+  const textRegex = /<w:t[^>]*>([^<]*)<\/w:t>/g;
+  const texts: string[] = [];
+  let match;
+  
+  while ((match = textRegex.exec(xmlContent)) !== null) {
+    const text = match[1].trim();
+    if (text && text.length > 1) {
+      texts.push(text);
+    }
+  }
+  
+  if (texts.length > 0) {
+    const result = texts.join(' ');
+    console.log(`Found ${texts.length} text segments in Word XML`);
+    return result;
+  }
+  
+  // Fallback to extract any text content
+  return extractTextFromXml(xmlContent);
+}
+
+// Specific function to extract text from Excel XML
+function extractTextFromExcelXml(xmlContent: string): string {
+  console.log('Extracting from Excel XML...');
+  
+  // Look for Excel cell values
+  const cellRegex = /<v>([^<]+)<\/v>/g;
+  const values: string[] = [];
+  let match;
+  
+  while ((match = cellRegex.exec(xmlContent)) !== null) {
+    const value = match[1].trim();
+    if (value && isNaN(Number(value))) { // Skip pure numbers
+      values.push(value);
+    }
+  }
+  
+  if (values.length > 0) {
+    return values.join(' ');
+  }
+  
+  return extractTextFromXml(xmlContent);
+}
+
+// Specific function to extract text from PowerPoint XML
+function extractTextFromPowerPointXml(xmlContent: string): string {
+  console.log('Extracting from PowerPoint XML...');
+  
+  // Look for PowerPoint text content
+  const textRegex = /<a:t>([^<]*)<\/a:t>/g;
+  const texts: string[] = [];
+  let match;
+  
+  while ((match = textRegex.exec(xmlContent)) !== null) {
+    const text = match[1].trim();
+    if (text && text.length > 1) {
+      texts.push(text);
+    }
+  }
+  
+  if (texts.length > 0) {
+    return texts.join(' ');
+  }
+  
+  return extractTextFromXml(xmlContent);
 }

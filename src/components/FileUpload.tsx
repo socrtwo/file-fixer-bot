@@ -5,7 +5,7 @@ import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { Upload, FileText, Table, Presentation, CheckCircle, AlertCircle, Download } from 'lucide-react';
-import JSZip from 'jszip';
+import { supabase } from '@/integrations/supabase/client';
 
 interface FileUploadProps {
   onFileProcessed: (result: RepairResult) => void;
@@ -114,193 +114,47 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
 
   const validateAndRepairFile = async (file: File): Promise<RepairResult> => {
     setProgress(10);
-    const fileType = ACCEPTED_TYPES[file.type as keyof typeof ACCEPTED_TYPES] || 'unknown';
     
     try {
-      setProgress(15);
+      setProgress(20);
       
-      // Read the file as array buffer
-      const arrayBuffer = await file.arrayBuffer();
-      setProgress(25);
+      // Create FormData to send file to backend
+      const formData = new FormData();
+      formData.append('file', file);
       
-      // Step 1: Attempt ZIP repair for all file types
-      let repairedArrayBuffer = arrayBuffer;
-      const issues: string[] = [];
+      setProgress(40);
       
-      try {
-        const zip = new JSZip();
-        await zip.loadAsync(arrayBuffer);
-        setProgress(35);
-      } catch (error) {
-        // ZIP is corrupted, attempt basic ZIP repair
-        issues.push('ZIP structure was corrupted and repaired');
-        repairedArrayBuffer = await repairZipStructure(arrayBuffer);
-        setProgress(35);
-      }
-      
-      // Try to load the (potentially repaired) ZIP
-      const zip = new JSZip();
-      let zipContent;
-      
-      try {
-        zipContent = await zip.loadAsync(repairedArrayBuffer);
-        setProgress(40);
-      } catch (error) {
-        // File is severely corrupted, try to extract what we can
-        return {
-          success: false,
-          fileName: file.name,
-          fileType,
-          originalSize: file.size,
-          issues: ['File is severely corrupted and cannot be opened as a ZIP archive even after repair attempts'],
-          status: 'failed'
-        };
-      }
-
-      let repairedFileV1: Blob | undefined;
-      let repairedFileV2: Blob | undefined;
-
-      // For Word documents, create Version 1 with document.xml repair
-      if (fileType === 'docx') {
-        setProgress(50);
-        const v1Zip = new JSZip();
-        
-        // Copy all files and specifically repair document.xml
-        for (const [path, zipFile] of Object.entries(zipContent.files)) {
-          const file = zipFile as JSZip.JSZipObject;
-          if (file.dir) {
-            v1Zip.folder(path);
-          } else if (path === 'word/document.xml') {
-            try {
-              const content = await file.async('string');
-              const repairedContent = repairDocumentXML(content);
-              v1Zip.file(path, repairedContent);
-              if (content !== repairedContent) {
-                issues.push('document.xml was truncated/repaired');
-              }
-            } catch (error) {
-              // Create minimal document.xml if completely corrupted
-              const minimalDoc = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-    <w:p>
-      <w:r>
-        <w:t>Document recovered. Original content was corrupted.</w:t>
-      </w:r>
-    </w:p>
-  </w:body>
-</w:document>`;
-              v1Zip.file(path, minimalDoc);
-              issues.push('document.xml was completely replaced with minimal content');
-            }
-          } else {
-            try {
-              v1Zip.file(path, await file.async('arraybuffer'));
-            } catch {
-              // Skip corrupted files in V1
-            }
-          }
-        }
-        
-        setProgress(60);
-        
-        // Generate Version 1
-        const v1ArrayBuffer = await v1Zip.generateAsync({
-          type: 'arraybuffer',
-          compression: 'DEFLATE',
-          compressionOptions: { level: 6 }
-        });
-        repairedFileV1 = new Blob([v1ArrayBuffer], { type: file.type });
-      }
-
-      setProgress(70);
-
-      // Create Version 2 (original repair method)
-      const repairedZip = new JSZip();
-      const essentialFiles = getEssentialFiles(fileType);
-      const missingFiles: string[] = [];
-      
-      // Validate and repair structure (original method)
-      for (const [path, zipFile] of Object.entries(zipContent.files)) {
-        try {
-          const file = zipFile as JSZip.JSZipObject;
-          if (file.dir) {
-            repairedZip.folder(path);
-          } else {
-            const content = await file.async('string');
-            
-            // Basic XML validation for Office files
-            if (path.endsWith('.xml') || path.endsWith('.rels')) {
-              if (!isValidXML(content)) {
-                issues.push(`Corrupted XML file: ${path}`);
-                // Try to repair basic XML issues
-                const repairedContent = repairXML(content);
-                repairedZip.file(path, repairedContent);
-              } else {
-                repairedZip.file(path, content);
-              }
-            } else {
-              repairedZip.file(path, await file.async('arraybuffer'));
-            }
-          }
-        } catch (error) {
-          issues.push(`Failed to process file: ${path}`);
-        }
-      }
-      
-      // Check for missing essential files
-      essentialFiles.forEach(essentialFile => {
-        if (!zipContent.files[essentialFile]) {
-          missingFiles.push(essentialFile);
-        }
+      // Call the Edge Function with p7zip
+      const { data, error } = await supabase.functions.invoke('repair-office-file', {
+        body: formData,
       });
-      
-      if (missingFiles.length > 0) {
-        issues.push(`Missing essential files: ${missingFiles.join(', ')}`);
-        // Add minimal versions of missing files
-        missingFiles.forEach(missingFile => {
-          const minimalContent = generateMinimalContent(missingFile, fileType);
-          if (minimalContent) {
-            repairedZip.file(missingFile, minimalContent);
-          }
-        });
+
+      setProgress(80);
+
+      if (error) {
+        throw new Error(error.message);
       }
-      
-      setProgress(90);
-      
-      // Generate Version 2
-      const v2ArrayBuffer = await repairedZip.generateAsync({
-        type: 'arraybuffer',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 }
-      });
-      repairedFileV2 = new Blob([v2ArrayBuffer], { type: file.type });
-      
+
       setProgress(100);
       
-      const status = issues.length === 0 ? 'success' : 
-                   missingFiles.length === 0 ? 'partial' : 'partial';
-      
-      return {
-        success: true,
-        fileName: file.name,
-        fileType,
-        originalSize: file.size,
-        repairedSize: fileType === 'docx' ? repairedFileV1?.size : repairedFileV2?.size,
-        issues: issues.length > 0 ? issues : undefined,
-        repairedFile: fileType === 'docx' ? repairedFileV1 : repairedFileV2,
-        repairedFileV2: fileType === 'docx' ? repairedFileV2 : undefined,
-        status
-      };
-      
+      // Convert the returned URL to a downloadable blob for backwards compatibility
+      if (data.repairedFileUrl) {
+        const response = await fetch(data.repairedFileUrl);
+        const blob = await response.blob();
+        data.repairedFile = blob;
+      }
+
+      return data as RepairResult;
+
     } catch (error) {
+      console.error('File processing error:', error);
       return {
         success: false,
         fileName: file.name,
-        fileType,
+        fileType: ACCEPTED_TYPES[file.type as keyof typeof ACCEPTED_TYPES] || 'Unknown',
         originalSize: file.size,
-        issues: [`Repair failed: ${error instanceof Error ? error.message : 'Unknown error'}`],
-        status: 'failed'
+        status: 'failed',
+        issues: [`Processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`]
       };
     }
   };

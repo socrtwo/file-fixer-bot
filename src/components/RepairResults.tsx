@@ -22,6 +22,7 @@ interface RepairResult {
   issues?: string[];
   repairedFile?: Blob;
   repairedFileV2?: Blob;
+  repairedFileUrl?: string;
   status: 'success' | 'partial' | 'failed';
 }
 
@@ -40,6 +41,18 @@ export const RepairResults = ({ result, onReset }: RepairResultsProps) => {
   };
 
   const downloadRepairedFile = (version: 'v1' | 'v2' = 'v1') => {
+    // Handle direct URL download from backend
+    if (result.repairedFileUrl && version === 'v1') {
+      const a = document.createElement('a');
+      a.href = result.repairedFileUrl;
+      a.download = `repaired_${result.fileName}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+
+    // Handle blob download (backwards compatibility)
     const fileToDownload = version === 'v1' ? result.repairedFile : result.repairedFileV2;
     if (!fileToDownload) return;
     

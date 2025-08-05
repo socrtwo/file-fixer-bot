@@ -1,1 +1,4 @@
 project_id = "mxhzehhalgrioplcujkk"
+
+[functions.repair-office-file]
+verify_jwt = false

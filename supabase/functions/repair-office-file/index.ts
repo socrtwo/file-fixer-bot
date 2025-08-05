@@ -66,16 +66,29 @@ serve(async (req) => {
     let recoveryMethod = 'none';
     
     try {
-      // Try to extract readable text from the actual file data
-      extractedContent = extractTextFromRawData(uint8Array);
-      console.log(`Extracted ${extractedContent.length} characters from raw data`);
-      
-      if (extractedContent.length > 50) {
-        recoveryMethod = 'raw_extraction';
+      // For Office documents, try ZIP extraction first since they are ZIP containers
+      if (['docx', 'xlsx', 'pptx'].includes(fileType)) {
+        console.log('Attempting ZIP extraction for Office document...');
+        const zipContent = await extractFromZip(uint8Array);
+        if (zipContent.length > 100) {
+          extractedContent = zipContent;
+          recoveryMethod = 'zip_extraction';
+          console.log(`ZIP extraction found ${zipContent.length} characters`);
+        }
       }
       
-      // If that fails, try ZIP-based extraction for Office docs
-      if (extractedContent.length < 50 && ['docx', 'xlsx', 'pptx', 'zip'].includes(fileType)) {
+      // Only try raw extraction if ZIP extraction failed or for non-Office files
+      if (extractedContent.length < 100) {
+        extractedContent = extractTextFromRawData(uint8Array);
+        console.log(`Extracted ${extractedContent.length} characters from raw data`);
+        
+        if (extractedContent.length > 50) {
+          recoveryMethod = 'raw_extraction';
+        }
+      }
+      
+      // Try ZIP-based extraction for ZIP files
+      if (extractedContent.length < 50 && fileType === 'zip') {
         console.log('Attempting ZIP extraction...');
         const zipContent = await extractFromZip(uint8Array);
         if (zipContent.length > extractedContent.length) {

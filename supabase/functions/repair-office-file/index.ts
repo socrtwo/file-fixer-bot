@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import StreamZip from 'https://esm.sh/node-stream-zip@1.15.0';
+import yauzl from 'https://esm.sh/yauzl@2.10.0';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -142,54 +142,90 @@ serve(async (req) => {
 });
 
 async function advancedZipRepair(arrayBuffer: ArrayBuffer, issues: string[]): Promise<ArrayBuffer | null> {
-  console.log('Using node-stream-zip for ZIP repair...');
+  console.log('Using yauzl for ZIP repair...');
   
   try {
     // Write the corrupted file to a temporary buffer
     const tempBuffer = Buffer.from(arrayBuffer);
     
-    // Try to extract files using node-stream-zip with error tolerance
-    const zip = new StreamZip.async({ 
-      buffer: tempBuffer,
-      skipEntryNameValidation: true,
-      skipValidateEntry: true
+    // Try to extract files using yauzl with error tolerance
+    return await new Promise((resolve, reject) => {
+      yauzl.fromBuffer(tempBuffer, { lazyEntries: true, validateEntrySizes: false }, (err, zipfile) => {
+        if (err) {
+          console.log(`yauzl failed to open ZIP: ${err.message}`);
+          reject(err);
+          return;
+        }
+        
+        console.log('Successfully opened ZIP with yauzl');
+        const extractedFiles: { [key: string]: Buffer } = {};
+        let entryCount = 0;
+        
+        zipfile.on("entry", (entry) => {
+          entryCount++;
+          
+          if (/\/$/.test(entry.fileName)) {
+            // Directory entry
+            zipfile.readEntry();
+            return;
+          }
+          
+          // File entry
+          zipfile.openReadStream(entry, (err, readStream) => {
+            if (err) {
+              console.log(`Failed to extract ${entry.fileName}: ${err.message}`);
+              issues.push(`Could not extract ${entry.fileName}: ${err.message}`);
+              zipfile.readEntry();
+              return;
+            }
+            
+            const chunks: Buffer[] = [];
+            readStream.on('data', (chunk) => {
+              chunks.push(chunk);
+            });
+            
+            readStream.on('end', () => {
+              extractedFiles[entry.fileName] = Buffer.concat(chunks);
+              console.log(`Extracted: ${entry.fileName} (${extractedFiles[entry.fileName].length} bytes)`);
+              zipfile.readEntry();
+            });
+            
+            readStream.on('error', (err) => {
+              console.log(`Error reading ${entry.fileName}: ${err.message}`);
+              issues.push(`Error reading ${entry.fileName}: ${err.message}`);
+              zipfile.readEntry();
+            });
+          });
+        });
+        
+        zipfile.on("end", async () => {
+          console.log(`yauzl extraction complete. Found ${entryCount} entries, extracted ${Object.keys(extractedFiles).length} files`);
+          issues.push(`Extracted ${Object.keys(extractedFiles).length} files from corrupted ZIP`);
+          
+          if (Object.keys(extractedFiles).length > 0) {
+            try {
+              const repairedZip = await rebuildZipFromExtractedFiles(extractedFiles, issues);
+              resolve(repairedZip);
+            } catch (error) {
+              reject(error);
+            }
+          } else {
+            issues.push('No files could be extracted from ZIP');
+            resolve(null);
+          }
+        });
+        
+        zipfile.on("error", (err) => {
+          console.log(`yauzl error: ${err.message}`);
+          reject(err);
+        });
+        
+        zipfile.readEntry();
+      });
     });
     
-    console.log('Successfully opened ZIP with node-stream-zip');
-    
-    // Get entries from the ZIP
-    const entries = await zip.entries();
-    const entryNames = Object.keys(entries);
-    
-    console.log(`Found ${entryNames.length} entries in ZIP`);
-    issues.push(`Extracted ${entryNames.length} files from corrupted ZIP`);
-    
-    // Extract and repair each file
-    const extractedFiles: { [key: string]: Buffer } = {};
-    
-    for (const entryName of entryNames) {
-      try {
-        const data = await zip.entryData(entryName);
-        extractedFiles[entryName] = Buffer.from(data);
-        console.log(`Extracted: ${entryName} (${data.length} bytes)`);
-      } catch (error) {
-        console.log(`Failed to extract ${entryName}: ${error.message}`);
-        issues.push(`Could not extract ${entryName}: ${error.message}`);
-      }
-    }
-    
-    await zip.close();
-    
-    // If we extracted files, rebuild the ZIP
-    if (Object.keys(extractedFiles).length > 0) {
-      return await rebuildZipFromExtractedFiles(extractedFiles, issues);
-    } else {
-      issues.push('No files could be extracted from ZIP');
-      return null;
-    }
-    
   } catch (error) {
-    console.log(`node-stream-zip failed: ${error.message}`);
+    console.log(`yauzl failed: ${error.message}`);
     issues.push(`ZIP extraction failed: ${error.message}`);
     
     // Fallback to manual header scanning

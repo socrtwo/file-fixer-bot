@@ -1,5 +1,6 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { inflate } from "https://deno.land/x/denoflate@1.2.1/mod.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -189,59 +190,49 @@ function getFileType(mimeType: string, fileName: string): string {
   return ext || 'unknown';
 }
 
-// Function to repair Office documents (DOCX, XLSX, PPTX)
+// Function to repair Office documents (DOCX, XLSX, PPTX) using advanced recovery
 async function repairOfficeDocument(data: Uint8Array): Promise<string> {
-  console.log('Attempting Office document repair...');
+  console.log('Attempting advanced Office document repair...');
   
+  try {
+    // Try to recover truncated/corrupt DOCX using custom recovery
+    const xmlContent = await recoverTruncatedDocxXML(data, 'word/document.xml');
+    if (xmlContent && xmlContent.length > 100) {
+      const extractedText = extractTextFromWordXml(xmlContent);
+      if (extractedText.length > 100) {
+        console.log(`Successfully recovered ${extractedText.length} characters from Word document`);
+        return extractedText;
+      }
+    }
+  } catch (e) {
+    console.log('Advanced recovery failed, trying fallback:', e.message);
+  }
+  
+  // Fallback to standard JSZip approach
   try {
     const JSZip = (await import('https://esm.sh/jszip@3.10.1')).default;
     
-    // Try multiple approaches to load the ZIP
-    let zip;
-    try {
-      // Most lenient loading options
-      zip = await JSZip.loadAsync(data, { 
-        checkCRC32: false, 
-        optimizedBinaryString: false,
-        createFolders: false,
-        decodeFileName: function(bytes) {
-          return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-        }
-      });
-      console.log('ZIP loaded successfully');
-    } catch (e) {
-      console.log('Standard ZIP load failed, trying binary repair...', e.message);
-      
-      // Try to find and repair the ZIP structure manually
-      const repaired = await repairZipData(data);
-      if (repaired) {
-        zip = await JSZip.loadAsync(repaired, { 
-          checkCRC32: false, 
-          optimizedBinaryString: false,
-          createFolders: false 
-        });
-        console.log('ZIP loaded after manual repair');
-      } else {
-        throw new Error('ZIP repair failed');
-      }
-    }
+    const zip = await JSZip.loadAsync(data, { 
+      checkCRC32: false, 
+      optimizedBinaryString: false,
+      createFolders: false
+    });
     
     const files = Object.keys(zip.files);
     console.log(`Document contains ${files.length} internal files:`, files.slice(0, 5));
     
     let repairedContent = '';
     
-    // Extract from Word documents with multiple fallbacks
+    // Extract from Word documents
     if (zip.files['word/document.xml']) {
       console.log('Found Word document content file');
       repairedContent = await extractWordContent(zip.files['word/document.xml']);
       if (repairedContent.length > 100) {
-        console.log(`Successfully extracted ${repairedContent.length} characters from Word document`);
         return repairedContent;
       }
     }
     
-    // Try other XML files in word directory
+    // Try other file types
     const wordFiles = files.filter(f => f.startsWith('word/') && f.endsWith('.xml'));
     for (const filename of wordFiles) {
       try {
@@ -254,71 +245,137 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
       }
     }
     
-    // Excel extraction
-    if (!repairedContent) {
-      const excelFiles = files.filter(f => f.startsWith('xl/worksheets/') && f.endsWith('.xml'));
-      for (const filename of excelFiles) {
-        try {
-          const content = await extractExcelContent(zip.files[filename]);
-          if (content.length > 50) {
-            repairedContent += content + '\n\n';
-          }
-        } catch (e) {
-          console.log(`Failed to extract Excel from ${filename}:`, e.message);
-        }
-      }
-    }
-    
-    // PowerPoint extraction
-    if (!repairedContent) {
-      const pptFiles = files.filter(f => f.startsWith('ppt/slides/') && f.endsWith('.xml'));
-      for (const filename of pptFiles) {
-        try {
-          const content = await extractPowerPointContent(zip.files[filename]);
-          if (content.length > 50) {
-            repairedContent += content + '\n\n';
-          }
-        } catch (e) {
-          console.log(`Failed to extract PowerPoint from ${filename}:`, e.message);
-        }
-      }
-    }
-    
     return repairedContent.trim();
     
   } catch (error) {
-    console.log('Office document repair failed:', error.message);
+    console.log('Standard Office document repair also failed:', error.message);
     return '';
   }
 }
 
-// Helper function to repair ZIP data structure
-async function repairZipData(data: Uint8Array): Promise<Uint8Array | null> {
-  try {
-    // Look for ZIP signature and try to fix common corruption issues
-    const signature = new Uint8Array([0x50, 0x4B, 0x03, 0x04]); // PK signature
-    
-    // Find the start of the ZIP file
-    let zipStart = -1;
-    for (let i = 0; i < Math.min(data.length, 1000); i++) {
-      if (data[i] === signature[0] && 
-          data[i + 1] === signature[1] && 
-          data[i + 2] === signature[2] && 
-          data[i + 3] === signature[3]) {
-        zipStart = i;
-        break;
+// Advanced recovery functions for truncated/corrupt ZIP files
+
+interface ZipEntry {
+  filename: string;
+  compressionMethod: number;
+  dataStart: number;
+  dataLength: number;
+}
+
+// Helper function to get little-endian values
+function getUint16LE(buffer: Uint8Array, offset: number): number {
+  return buffer[offset] | (buffer[offset + 1] << 8);
+}
+
+function getUint32LE(buffer: Uint8Array, offset: number): number {
+  return buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16) | (buffer[offset + 3] << 24);
+}
+
+// Scan for local file headers and extract entry info
+function scanLocalHeaders(buffer: Uint8Array, targetFilename: string): ZipEntry | null {
+  const signature = 0x04034b50; // Local file header signature
+  
+  for (let i = 0; i <= buffer.length - 30; i++) {
+    if (getUint32LE(buffer, i) === signature) {
+      const compressionMethod = getUint16LE(buffer, i + 8);
+      const compressedSize = getUint32LE(buffer, i + 18);
+      const filenameLength = getUint16LE(buffer, i + 26);
+      const extraFieldLength = getUint16LE(buffer, i + 28);
+      
+      if (i + 30 + filenameLength <= buffer.length) {
+        const filename = new TextDecoder().decode(buffer.slice(i + 30, i + 30 + filenameLength));
+        
+        if (filename === targetFilename) {
+          const dataStart = i + 30 + filenameLength + extraFieldLength;
+          const dataLength = compressedSize > 0
+            ? Math.min(buffer.length - dataStart, compressedSize)
+            : buffer.length - dataStart;
+          return {
+            filename,
+            compressionMethod,
+            dataStart,
+            dataLength,
+          };
+        }
       }
     }
-    
-    if (zipStart > 0) {
-      console.log(`Found ZIP signature at offset ${zipStart}, trimming`);
-      return data.slice(zipStart);
+  }
+  return null;
+}
+
+// Try to decompress, handling truncated data
+function tryInflate(data: Uint8Array): string | null {
+  try {
+    const xmlBytes = inflate(data);
+    return new TextDecoder().decode(xmlBytes);
+  } catch (err) {
+    // Attempt to decompress possibly truncated deflate stream
+    for (let end = data.length - 1; end > 32; end -= 256) {
+      try {
+        const xmlBytes = inflate(data.slice(0, end));
+        return new TextDecoder().decode(xmlBytes);
+      } catch (_) {}
     }
-    
-    return null;
-  } catch (e) {
     return null;
   }
+}
+
+// Fix truncated XML by trimming and closing the root tag
+function repairTruncatedXML(xmlRaw: string, rootTag: string): string {
+  // Remove any non-XML trailing bytes
+  let i = xmlRaw.lastIndexOf(`</${rootTag}>`);
+  if (i !== -1) {
+    // Already has proper closing tag
+    return xmlRaw.slice(0, i + rootTag.length + 3);
+  }
+  
+  // Search backwards for the last complete tag
+  let validUpto = xmlRaw.length;
+  for (let j = xmlRaw.length - 1; j >= 0; j--) {
+    if (xmlRaw[j] === '>') {
+      validUpto = j + 1;
+      break;
+    }
+  }
+  
+  // Append closing tag
+  return xmlRaw.slice(0, validUpto) + `</${rootTag}>`;
+}
+
+// Main recovery function
+async function recoverTruncatedDocxXML(
+  zipBuffer: Uint8Array,
+  targetXml: string = 'word/document.xml'
+): Promise<string> {
+  console.log(`Attempting to recover ${targetXml} from corrupted ZIP...`);
+  
+  // Find the target entry and extract compressed data
+  const entry = scanLocalHeaders(zipBuffer, targetXml);
+  if (!entry) {
+    throw new Error("Target file not found in zip (even partially)");
+  }
+  
+  console.log(`Found ${targetXml}: compression=${entry.compressionMethod}, dataLength=${entry.dataLength}`);
+  
+  const compressedData = zipBuffer.slice(entry.dataStart, entry.dataStart + entry.dataLength);
+  let xmlRaw: string | null = null;
+  
+  // Handle compression (0 = store, 8 = deflate)
+  if (entry.compressionMethod === 0) {
+    xmlRaw = new TextDecoder().decode(compressedData);
+  } else if (entry.compressionMethod === 8) {
+    xmlRaw = tryInflate(compressedData);
+    if (!xmlRaw) throw new Error("Failed to recover (decompress) XML from partial file.");
+  } else {
+    throw new Error("Unsupported compression method: " + entry.compressionMethod);
+  }
+  
+  // Try to auto-detect main root tag
+  let rootTag = "document";
+  const m = xmlRaw.match(/<(\w+)[^>]*>/);
+  if (m) rootTag = m[1];
+  
+  return repairTruncatedXML(xmlRaw, rootTag);
 }
 
 // Helper function to extract content from Word XML files

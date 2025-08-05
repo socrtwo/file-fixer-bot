@@ -380,9 +380,42 @@ function extractActualTextFromData(data: Uint8Array): string {
 // Function to extract text from XML content
 function extractTextFromXml(xmlContent: string): string {
   try {
-    // Remove XML tags and extract text content
+    console.log('Extracting text from XML, content length:', xmlContent.length);
+    
+    // For Word documents, extract text from <w:t> tags specifically
+    const wordTextRegex = /<w:t[^>]*>(.*?)<\/w:t>/gs;
+    let wordMatches = [];
+    let match;
+    while ((match = wordTextRegex.exec(xmlContent)) !== null) {
+      const textContent = match[1];
+      if (textContent && textContent.trim() && textContent.length > 2) {
+        wordMatches.push(textContent.trim());
+      }
+    }
+    
+    if (wordMatches.length > 5) {
+      const extractedText = wordMatches.join(' ');
+      console.log(`Extracted ${wordMatches.length} text segments from Word XML`);
+      return extractedText;
+    }
+    
+    // For other XML types, try paragraph tags
+    const paragraphRegex = /<(?:p|para)[^>]*>(.*?)<\/(?:p|para)>/gs;
+    let paragraphMatches = [];
+    while ((match = paragraphRegex.exec(xmlContent)) !== null) {
+      const content = match[1].replace(/<[^>]*>/g, ' ').trim();
+      if (content && content.length > 10) {
+        paragraphMatches.push(content);
+      }
+    }
+    
+    if (paragraphMatches.length > 0) {
+      return paragraphMatches.join(' ');
+    }
+    
+    // Generic text extraction as fallback
     let text = xmlContent
-      .replace(/<[^>]*>/g, ' ') // Remove XML tags
+      .replace(/<[^>]*>/g, ' ') // Remove all XML tags
       .replace(/&amp;/g, '&')   // Decode entities
       .replace(/&lt;/g, '<')
       .replace(/&gt;/g, '>')
@@ -391,12 +424,18 @@ function extractTextFromXml(xmlContent: string): string {
       .replace(/\s+/g, ' ')     // Normalize whitespace
       .trim();
     
-    // Filter out very short or meaningless content
-    const sentences = text.split(/[.!?]+/)
-      .map(s => s.trim())
-      .filter(s => s.length > 10 && /[a-zA-Z]/.test(s));
+    // Only return meaningful text (not just metadata)
+    const words = text.split(/\s+/).filter(word => 
+      word.length > 3 && 
+      /^[a-zA-Z]/.test(word) && 
+      !word.match(/^(xml|PK|Content|Types|rels|word|document|theme|settings|styles|core|numbering|fontTable|docProps)$/i)
+    );
     
-    return sentences.join('. ');
+    if (words.length > 20) {
+      return words.join(' ');
+    }
+    
+    return '';
     
   } catch (error) {
     console.error('XML text extraction error:', error);

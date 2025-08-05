@@ -481,7 +481,49 @@ function generateMinimalPptxContent(filePath: string): string {
 }
 
 async function advancedZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> {
-  console.log('Using yauzl for ZIP repair...');
+  console.log('Using zip -FF command for ZIP repair...');
+  
+  try {
+    // Create temporary files
+    const tempDir = await Deno.makeTempDir();
+    const inputPath = `${tempDir}/damaged.zip`;
+    const outputPath = `${tempDir}/fixed.zip`;
+    
+    // Write damaged file
+    await Deno.writeFile(inputPath, new Uint8Array(arrayBuffer));
+    
+    // Run zip -FF command
+    const command = new Deno.Command("zip", {
+      args: ["-FF", inputPath, "--out", outputPath],
+      cwd: tempDir,
+    });
+    
+    const { code, stderr } = await command.output();
+    
+    if (code === 0) {
+      // Read repaired file
+      const repairedData = await Deno.readFile(outputPath);
+      
+      // Cleanup
+      await Deno.remove(tempDir, { recursive: true });
+      
+      console.log('ZIP repair successful using zip -FF command');
+      return repairedData;
+    } else {
+      const errorText = new TextDecoder().decode(stderr);
+      console.log('zip -FF failed:', errorText);
+      
+      // Fallback to JavaScript-based repair
+      return await fallbackZipRepair(arrayBuffer);
+    }
+  } catch (error) {
+    console.log('zip -FF command not available, using fallback:', error.message);
+    return await fallbackZipRepair(arrayBuffer);
+  }
+}
+
+async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> {
+  console.log('Using yauzl fallback for ZIP repair...');
   
   const tempBuffer = Buffer.from(arrayBuffer);
   

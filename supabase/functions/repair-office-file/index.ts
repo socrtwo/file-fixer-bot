@@ -525,7 +525,7 @@ async function advancedZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
 async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> {
   console.log('Using yauzl fallback for ZIP repair...');
   
-  const tempBuffer = Buffer.from(arrayBuffer);
+  const tempBuffer = new Uint8Array(arrayBuffer);
   
   return await new Promise((resolve, reject) => {
     yauzl.fromBuffer(tempBuffer, { lazyEntries: true, validateEntrySizes: false }, (err, zipfile) => {
@@ -534,7 +534,7 @@ async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
         return;
       }
       
-      const extractedFiles: { [key: string]: Buffer } = {};
+      const extractedFiles: { [key: string]: Uint8Array } = {};
       
       zipfile.on("entry", (entry) => {
         if (/\/$/.test(entry.fileName)) {
@@ -548,13 +548,20 @@ async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
             return;
           }
           
-          const chunks: Buffer[] = [];
+          const chunks: Uint8Array[] = [];
           readStream.on('data', (chunk) => {
-            chunks.push(chunk);
+            chunks.push(new Uint8Array(chunk));
           });
           
           readStream.on('end', () => {
-            extractedFiles[entry.fileName] = Buffer.concat(chunks);
+            const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+              result.set(chunk, offset);
+              offset += chunk.length;
+            }
+            extractedFiles[entry.fileName] = result;
             zipfile.readEntry();
           });
           
@@ -735,7 +742,7 @@ function repairDocumentXml(xmlContent: string): string {
   }
 }
 
-async function rebuildZipFromExtractedFiles(extractedFiles: { [key: string]: Buffer }): Promise<ArrayBuffer> {
+async function rebuildZipFromExtractedFiles(extractedFiles: { [key: string]: Uint8Array }): Promise<ArrayBuffer> {
   const zip = new JSZip();
   
   for (const [fileName, fileData] of Object.entries(extractedFiles)) {

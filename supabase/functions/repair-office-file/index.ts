@@ -741,6 +741,27 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
             }
           }
           
+          // Try to extract partial content from raw compressed data
+          if (!decompressed) {
+            console.log(`Attempting partial data recovery for ${filename}`);
+            
+            try {
+              // Look for readable text patterns in the compressed data
+              const rawText = new TextDecoder('utf-8', { fatal: false }).decode(compressedData);
+              const extractedText = extractReadableTextFromCorrupted(rawText);
+              
+              if (extractedText.length > 20) {
+                // Create proper Word XML with recovered text
+                const xmlContent = createDocumentXmlWithContent(extractedText);
+                fileData = new TextEncoder().encode(xmlContent);
+                console.log(`Created document.xml with recovered text: ${extractedText.length} characters, ${fileData.length} bytes`);
+                decompressed = true;
+              }
+            } catch (textError) {
+              console.log(`Text extraction failed for ${filename}:`, textError.message);
+            }
+          }
+          
           // If all advanced methods failed, create minimal XML content
           if (!decompressed) {
             console.log(`All decompression methods failed for ${filename}, creating minimal XML replacement`);
@@ -948,6 +969,59 @@ function repairDocumentXml(xmlContent: string): string {
   </w:body>
 </w:document>`;
   }
+}
+
+// Function to extract readable text from corrupted compressed data
+function extractReadableTextFromCorrupted(rawData: string): string {
+  // Look for common Word text patterns
+  const textChunks: string[] = [];
+  
+  // Split by null bytes and non-printable characters
+  const segments = rawData.split(/[\x00-\x08\x0B-\x1F\x7F-\xFF]+/);
+  
+  for (const segment of segments) {
+    // Look for segments that contain readable words (3+ letters)
+    const words = segment.match(/[a-zA-Z]{3,}/g);
+    if (words && words.length >= 2) {
+      // This segment likely contains readable text
+      const cleanText = segment
+        .replace(/[^\x20-\x7E\s]/g, ' ') // Replace non-printable chars with spaces
+        .replace(/\s+/g, ' ')           // Normalize whitespace
+        .trim();
+        
+      if (cleanText.length > 10) {
+        textChunks.push(cleanText);
+      }
+    }
+  }
+  
+  return textChunks.join(' ').substring(0, 2000); // Limit to reasonable size
+}
+
+// Function to create proper Word XML with recovered content
+function createDocumentXmlWithContent(content: string): string {
+  // Split content into paragraphs for better formatting
+  const paragraphs = content.split(/[.!?]+/).filter(p => p.trim().length > 0);
+  
+  let xmlParagraphs = '';
+  for (const paragraph of paragraphs.slice(0, 10)) { // Limit to 10 paragraphs
+    const cleanParagraph = paragraph.trim().replace(/[<>&"']/g, ''); // Escape XML chars
+    if (cleanParagraph.length > 0) {
+      xmlParagraphs += `    <w:p>
+      <w:r>
+        <w:t>${cleanParagraph}.</w:t>
+      </w:r>
+    </w:p>
+`;
+    }
+  }
+  
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+${xmlParagraphs}
+  </w:body>
+</w:document>`;
 }
 
 async function rebuildZipFromExtractedFiles(extractedFiles: { [key: string]: Uint8Array }): Promise<ArrayBuffer> {

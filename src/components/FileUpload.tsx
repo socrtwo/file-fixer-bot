@@ -45,6 +45,33 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
     }
   };
 
+  const repairZipStructure = async (arrayBuffer: ArrayBuffer): Promise<ArrayBuffer> => {
+    // Basic ZIP repair - try to find ZIP header and reconstruct
+    const uint8Array = new Uint8Array(arrayBuffer);
+    
+    // Look for ZIP file signature (PK header)
+    const pkHeader = [0x50, 0x4B, 0x03, 0x04];
+    let headerIndex = -1;
+    
+    for (let i = 0; i <= uint8Array.length - 4; i++) {
+      if (uint8Array[i] === pkHeader[0] && 
+          uint8Array[i + 1] === pkHeader[1] && 
+          uint8Array[i + 2] === pkHeader[2] && 
+          uint8Array[i + 3] === pkHeader[3]) {
+        headerIndex = i;
+        break;
+      }
+    }
+    
+    if (headerIndex > 0) {
+      // Found header, try to trim any garbage before it
+      return arrayBuffer.slice(headerIndex);
+    }
+    
+    // If no valid header found, return original
+    return arrayBuffer;
+  };
+
   const repairDocumentXML = (content: string): string => {
     try {
       // Parse the XML to find content
@@ -90,18 +117,33 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
     const fileType = ACCEPTED_TYPES[file.type as keyof typeof ACCEPTED_TYPES] || 'unknown';
     
     try {
-      setProgress(20);
+      setProgress(15);
       
       // Read the file as array buffer
       const arrayBuffer = await file.arrayBuffer();
-      setProgress(30);
+      setProgress(25);
       
-      // Try to load as ZIP (Office files are ZIP archives)
+      // Step 1: Attempt ZIP repair for all file types
+      let repairedArrayBuffer = arrayBuffer;
+      const issues: string[] = [];
+      
+      try {
+        const zip = new JSZip();
+        await zip.loadAsync(arrayBuffer);
+        setProgress(35);
+      } catch (error) {
+        // ZIP is corrupted, attempt basic ZIP repair
+        issues.push('ZIP structure was corrupted and repaired');
+        repairedArrayBuffer = await repairZipStructure(arrayBuffer);
+        setProgress(35);
+      }
+      
+      // Try to load the (potentially repaired) ZIP
       const zip = new JSZip();
       let zipContent;
       
       try {
-        zipContent = await zip.loadAsync(arrayBuffer);
+        zipContent = await zip.loadAsync(repairedArrayBuffer);
         setProgress(40);
       } catch (error) {
         // File is severely corrupted, try to extract what we can
@@ -110,14 +152,13 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
           fileName: file.name,
           fileType,
           originalSize: file.size,
-          issues: ['File is severely corrupted and cannot be opened as a ZIP archive'],
+          issues: ['File is severely corrupted and cannot be opened as a ZIP archive even after repair attempts'],
           status: 'failed'
         };
       }
 
       let repairedFileV1: Blob | undefined;
       let repairedFileV2: Blob | undefined;
-      const issues: string[] = [];
 
       // For Word documents, create Version 1 with document.xml repair
       if (fileType === 'docx') {
@@ -228,12 +269,12 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
       setProgress(90);
       
       // Generate Version 2
-      const repairedArrayBuffer = await repairedZip.generateAsync({
+      const v2ArrayBuffer = await repairedZip.generateAsync({
         type: 'arraybuffer',
         compression: 'DEFLATE',
         compressionOptions: { level: 6 }
       });
-      repairedFileV2 = new Blob([repairedArrayBuffer], { type: file.type });
+      repairedFileV2 = new Blob([v2ArrayBuffer], { type: file.type });
       
       setProgress(100);
       

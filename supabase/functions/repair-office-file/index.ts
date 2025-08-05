@@ -523,70 +523,153 @@ async function advancedZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
 }
 
 async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> {
-  console.log('Using yauzl fallback for ZIP repair...');
+  console.log('Using advanced binary ZIP repair (mimicking zip -FF)...');
   
-  const tempBuffer = new Uint8Array(arrayBuffer);
+  const uint8Array = new Uint8Array(arrayBuffer);
+  const extractedFiles: { [key: string]: Uint8Array } = {};
   
-  return await new Promise((resolve, reject) => {
-    yauzl.fromBuffer(tempBuffer, { lazyEntries: true, validateEntrySizes: false }, (err, zipfile) => {
-      if (err) {
-        reject(err);
-        return;
+  // Step 1: Scan for ZIP local file header signatures (0x04034b50)
+  const localFileHeaders: number[] = [];
+  for (let i = 0; i < uint8Array.length - 4; i++) {
+    if (uint8Array[i] === 0x50 && uint8Array[i+1] === 0x4b && 
+        uint8Array[i+2] === 0x03 && uint8Array[i+3] === 0x04) {
+      localFileHeaders.push(i);
+    }
+  }
+  
+  console.log(`Found ${localFileHeaders.length} potential file headers`);
+  
+  // Step 2: Parse each local file header manually
+  for (const headerOffset of localFileHeaders) {
+    try {
+      const fileInfo = parseLocalFileHeader(uint8Array, headerOffset);
+      if (fileInfo && fileInfo.filename && fileInfo.data) {
+        extractedFiles[fileInfo.filename] = fileInfo.data;
+        console.log(`Recovered file: ${fileInfo.filename} (${fileInfo.data.length} bytes)`);
       }
-      
-      const extractedFiles: { [key: string]: Uint8Array } = {};
-      
-      zipfile.on("entry", (entry) => {
-        if (/\/$/.test(entry.fileName)) {
-          zipfile.readEntry();
-          return;
+    } catch (error) {
+      console.log(`Failed to parse header at offset ${headerOffset}:`, error.message);
+    }
+  }
+  
+  if (Object.keys(extractedFiles).length === 0) {
+    throw new Error('No files could be recovered from corrupt ZIP');
+  }
+  
+  console.log(`Successfully recovered ${Object.keys(extractedFiles).length} files`);
+  return new Uint8Array(await rebuildZipFromExtractedFiles(extractedFiles));
+}
+
+// Parse ZIP local file header manually (mimics zip -FF behavior)
+function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: string; data: Uint8Array } | null {
+  try {
+    // Local file header structure:
+    // 0-3: signature (0x04034b50)
+    // 4-5: version needed
+    // 6-7: flags
+    // 8-9: compression method
+    // 10-13: last mod time/date
+    // 14-17: crc32
+    // 18-21: compressed size
+    // 22-25: uncompressed size
+    // 26-27: filename length
+    // 28-29: extra field length
+    // 30+: filename + extra field + data
+    
+    if (offset + 30 > data.length) return null;
+    
+    const filenameLength = data[offset + 26] | (data[offset + 27] << 8);
+    const extraFieldLength = data[offset + 28] | (data[offset + 29] << 8);
+    const compressedSize = (data[offset + 18] | (data[offset + 19] << 8) | 
+                           (data[offset + 20] << 16) | (data[offset + 21] << 24)) >>> 0;
+    const compressionMethod = data[offset + 8] | (data[offset + 9] << 8);
+    
+    const filenameStart = offset + 30;
+    const dataStart = filenameStart + filenameLength + extraFieldLength;
+    
+    // Extract filename
+    if (filenameStart + filenameLength > data.length) return null;
+    const filename = new TextDecoder().decode(data.slice(filenameStart, filenameStart + filenameLength));
+    
+    // Skip directories
+    if (filename.endsWith('/')) return null;
+    
+    // Extract file data
+    let fileData: Uint8Array;
+    if (compressedSize > 0 && dataStart + compressedSize <= data.length) {
+      // Use specified compressed size
+      fileData = data.slice(dataStart, dataStart + compressedSize);
+    } else {
+      // Size is corrupted or missing, find next header or use remaining data
+      let endOffset = data.length;
+      for (let i = dataStart + 1; i < data.length - 4; i++) {
+        if (data[i] === 0x50 && data[i+1] === 0x4b && 
+            data[i+2] === 0x03 && data[i+3] === 0x04) {
+          endOffset = i;
+          break;
         }
-        
-        zipfile.openReadStream(entry, (err, readStream) => {
-          if (err) {
-            zipfile.readEntry();
-            return;
-          }
-          
-          const chunks: Uint8Array[] = [];
-          readStream.on('data', (chunk) => {
-            chunks.push(new Uint8Array(chunk));
-          });
-          
-          readStream.on('end', () => {
-            const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-            const result = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-              result.set(chunk, offset);
-              offset += chunk.length;
-            }
-            extractedFiles[entry.fileName] = result;
-            zipfile.readEntry();
-          });
-          
-          readStream.on('error', (err) => {
-            zipfile.readEntry();
-          });
-        });
-      });
-      
-      zipfile.on("end", async () => {
-        if (Object.keys(extractedFiles).length > 0) {
-          try {
-            const repairedZip = await rebuildZipFromExtractedFiles(extractedFiles);
-            resolve(new Uint8Array(repairedZip));
-          } catch (error) {
-            reject(error);
-          }
-        } else {
-          reject(new Error('No files could be extracted'));
-        }
-      });
-      
-      zipfile.readEntry();
-    });
-  });
+      }
+      fileData = data.slice(dataStart, endOffset);
+    }
+    
+    // Decompress if needed (only handle stored and deflate)
+    if (compressionMethod === 0) {
+      // Stored (no compression)
+      return { filename, data: fileData };
+    } else if (compressionMethod === 8) {
+      // Deflate compression - try to decompress
+      try {
+        const decompressed = decompressDeflate(fileData);
+        return { filename, data: decompressed };
+      } catch (error) {
+        console.log(`Failed to decompress ${filename}, keeping compressed data`);
+        return { filename, data: fileData };
+      }
+    } else {
+      // Unknown compression, keep as-is
+      return { filename, data: fileData };
+    }
+  } catch (error) {
+    return null;
+  }
+}
+
+// Simple deflate decompression using built-in DecompressionStream
+function decompressDeflate(compressedData: Uint8Array): Uint8Array {
+  try {
+    const stream = new DecompressionStream('deflate-raw');
+    const writer = stream.writable.getWriter();
+    const reader = stream.readable.getReader();
+    
+    // Write compressed data
+    writer.write(compressedData);
+    writer.close();
+    
+    // Read decompressed data
+    const chunks: Uint8Array[] = [];
+    let done = false;
+    
+    while (!done) {
+      const { value, done: readerDone } = reader.read();
+      done = readerDone;
+      if (value) {
+        chunks.push(new Uint8Array(value));
+      }
+    }
+    
+    // Combine chunks
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+    
+    return result;
+  } catch (error) {
+    throw new Error(`Decompression failed: ${error.message}`);
+  }
 }
 
 // ZIP-specific repair

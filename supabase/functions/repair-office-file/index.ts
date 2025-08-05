@@ -61,6 +61,7 @@ serve(async (req) => {
     ];
 
     if (!allowedTypes.includes(file.type)) {
+      console.log(`Unsupported file type: ${file.type}`);
       return new Response(JSON.stringify({ error: 'Unsupported file type' }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -72,6 +73,7 @@ serve(async (req) => {
     const uint8Array = new Uint8Array(fileData);
     
     console.log(`File data length: ${uint8Array.length}`);
+    console.log(`First 20 bytes: ${Array.from(uint8Array.slice(0, 20)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
 
     // Determine file type and repair accordingly
     const fileType = getFileType(file.type);
@@ -81,8 +83,14 @@ serve(async (req) => {
     let repairResult: RepairResult;
     
     try {
+      console.log('Starting initial repair attempt...');
       repairResult = await repairOfficeFile(uint8Array, file.name, fileType);
       console.log(`Initial repair result: ${repairResult.success ? 'success' : 'failed'}`);
+      if (repairResult.repairedFile) {
+        console.log(`Repaired file size: ${repairResult.repairedFile.length}`);
+      } else {
+        console.log('No repaired file data returned');
+      }
     } catch (error) {
       console.error('Error during initial repair:', error);
       repairResult = {
@@ -156,12 +164,26 @@ serve(async (req) => {
       }
     }
 
-    // Ensure we never return zero-byte files
-    if (repairResult.success && repairResult.recoveryStats?.repairedSize === 0) {
-      console.log('Warning: Repaired file has zero size, marking as partial success');
+    // Ensure we never return zero-byte files - create emergency fallback
+    if (!repairResult.repairedFile || repairResult.repairedFile.length === 0 || 
+        (repairResult.recoveryStats?.repairedSize === 0)) {
+      console.log('CRITICAL: Zero-byte file detected, creating emergency fallback');
+      
+      const emergencyContent = await createEmergencyFallbackFile(fileType, file.name);
+      repairResult.repairedFile = emergencyContent;
+      repairResult.success = true;
       repairResult.status = 'partial';
       repairResult.issues = repairResult.issues || [];
-      repairResult.issues.push('Repaired file is empty - only structure was recovered');
+      repairResult.issues.push('Original file was severely corrupted - emergency minimal structure created');
+      
+      // Update recovery stats
+      const fallbackSize = Math.floor(emergencyContent.length * 0.75); // Approximate binary size
+      repairResult.recoveryStats = {
+        originalSize: fileData.length,
+        repairedSize: fallbackSize,
+        corruptionLevel: 'critical',
+        recoveredData: 0
+      };
     }
 
     console.log(`Final repair result: ${JSON.stringify(repairResult, null, 2)}`);
@@ -919,4 +941,66 @@ function generatePptxSlide(): string {
     <a:masterClrMapping/>
   </p:clrMapOvr>
 </p:sld>`;
+}
+
+// Emergency fallback file creation function
+async function createEmergencyFallbackFile(fileType: string, fileName: string): Promise<string> {
+  console.log(`Creating emergency fallback file for type: ${fileType}`);
+  
+  try {
+    const JSZip = (await import('https://esm.sh/jszip@3.10.1')).default;
+    const zip = new JSZip();
+    
+    const emergencyContent = `EMERGENCY RECOVERY FILE
+    
+This file was created because the original "${fileName}" was severely corrupted.
+The original content could not be recovered.
+
+Generated on: ${new Date().toISOString()}
+File type: ${fileType.toUpperCase()}`;
+
+    switch (fileType) {
+      case 'docx':
+        zip.file('[Content_Types].xml', generateContentTypes());
+        zip.file('_rels/.rels', generateMainRels());
+        zip.file('word/_rels/document.xml.rels', generateDocumentRels());
+        zip.file('word/document.xml', createDocumentXmlWithContent(emergencyContent));
+        break;
+        
+      case 'xlsx':
+        zip.file('[Content_Types].xml', generateXlsxContentTypes());
+        zip.file('_rels/.rels', generateXlsxMainRels());
+        zip.file('xl/_rels/workbook.xml.rels', generateXlsxWorkbookRels());
+        zip.file('xl/workbook.xml', generateXlsxWorkbook());
+        zip.file('xl/worksheets/sheet1.xml', generateXlsxWorksheet());
+        break;
+        
+      case 'pptx':
+        zip.file('[Content_Types].xml', generatePptxContentTypes());
+        zip.file('_rels/.rels', generatePptxMainRels());
+        zip.file('ppt/_rels/presentation.xml.rels', generatePptxPresentationRels());
+        zip.file('ppt/presentation.xml', generatePptxPresentation());
+        zip.file('ppt/slides/slide1.xml', generatePptxSlide());
+        break;
+        
+      case 'zip':
+        zip.file('RECOVERY_INFO.txt', emergencyContent);
+        break;
+        
+      default:
+        // For any other type, create a simple text file
+        return btoa(emergencyContent);
+    }
+    
+    const repairedData = await zip.generateAsync({ type: 'uint8array' });
+    console.log(`Emergency fallback created: ${repairedData.length} bytes`);
+    
+    return btoa(String.fromCharCode(...repairedData));
+    
+  } catch (error) {
+    console.error('Error creating emergency fallback:', error);
+    // Ultimate fallback - just return base64 encoded text
+    const emergencyText = `EMERGENCY RECOVERY: Original file "${fileName}" was corrupted beyond repair.`;
+    return btoa(emergencyText);
+  }
 }

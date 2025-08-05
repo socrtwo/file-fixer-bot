@@ -216,26 +216,25 @@ function extractTextFromRawData(data: Uint8Array): string {
       .replace(/\s+/g, ' ') // Normalize whitespace
       .trim();
     
-    // Split into potential sentences and filter for meaningful content
+    // Much more strict filtering - sentences must have common English words
+    const commonWords = /\b(the|and|or|but|in|on|at|to|for|of|with|by|from|up|about|into|through|during|before|after|above|below|between|among|around|under|over|since|until|while|because|although|unless|if|when|where|what|who|which|how|why|this|that|these|those|some|many|few|several|all|most|each|every|both|either|neither|one|two|three|first|second|third|last|next|previous|other|another|same|different|new|old|good|bad|big|small|long|short|high|low|early|late|here|there|now|then|today|tomorrow|yesterday)\b/i;
+    
     const sentences = extractedText.split(/[.!?]+/)
       .map(s => s.trim())
-      .filter(s => s.length > 10 && /[a-zA-Z]/.test(s))
-      .filter(s => !s.match(/^[^a-zA-Z]*$/)); // Remove lines with only symbols/numbers
+      .filter(s => s.length > 20) // Longer minimum length
+      .filter(s => /[a-zA-Z]/.test(s))
+      .filter(s => commonWords.test(s)) // Must contain common English words
+      .filter(s => (s.match(/[a-zA-Z]/g) || []).length > s.length * 0.5) // At least 50% alphabetic
+      .filter(s => !/^[^a-zA-Z]*$/.test(s)); // Remove lines with only symbols/numbers
     
-    if (sentences.length > 0) {
-      extractedText = sentences.join('. ').substring(0, 5000); // Limit length
+    // Only accept if we have truly meaningful content
+    if (sentences.length >= 5 && sentences.join('').length > 200) {
+      extractedText = sentences.join('. ').substring(0, 5000);
       console.log(`Found ${sentences.length} meaningful sentences`);
       return extractedText;
     }
     
-    // Fallback: look for any alphabetic sequences
-    const words = extractedText.match(/[a-zA-Z]{3,}/g);
-    if (words && words.length > 10) {
-      const reconstructed = words.slice(0, 200).join(' ');
-      console.log(`Reconstructed from ${words.length} words`);
-      return reconstructed;
-    }
-    
+    console.log('No meaningful readable text found in raw data');
     return '';
     
   } catch (error) {

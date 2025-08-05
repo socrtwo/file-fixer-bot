@@ -16,6 +16,8 @@ interface RepairResult {
   fileName: string;
   status: 'success' | 'partial' | 'failed';
   issues?: string[];
+  repairedFile?: string; // base64 string from edge function
+  repairedFileBlob?: Blob; // converted blob for download
   downloadUrl?: string;
   preview?: {
     content?: string;
@@ -24,11 +26,15 @@ interface RepairResult {
     recoveredFiles?: string[];
     fileSize?: number;
   };
-  fileType?: 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF';
+  fileType?: 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF' | 'txt';
   recoveryStats?: {
     totalFiles: number;
     recoveredFiles: number;
     corruptedFiles: number;
+    originalSize?: number;
+    repairedSize?: number;
+    corruptionLevel?: string;
+    recoveredData?: number;
   };
 }
 
@@ -136,37 +142,60 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
       
       setProgress(40);
       
-      // Call the Edge Function with p7zip
+      // Call the Edge Function
+      console.log('Calling edge function with file:', file.name);
       const { data, error } = await supabase.functions.invoke('repair-office-file', {
         body: formData,
       });
 
       setProgress(80);
+      console.log('Edge function response:', { data, error });
 
       if (error) {
-        throw new Error(error.message);
+        console.error('Edge function error:', error);
+        throw new Error(`Failed to send a request to the Edge Function`);
+      }
+
+      if (!data) {
+        console.error('No data returned from edge function');
+        throw new Error('No data returned from edge function');
       }
 
       setProgress(100);
       
-      // Convert the returned URL to a downloadable blob for backwards compatibility
-      if (data.repairedFileUrl) {
-        const response = await fetch(data.repairedFileUrl);
-        const blob = await response.blob();
-        data.repairedFile = blob;
+      // Log the response structure
+      console.log('Edge function returned data:', {
+        success: data.success,
+        fileName: data.fileName,
+        repairedFileLength: data.repairedFile?.length || 0,
+        hasRepairedFile: !!data.repairedFile
+      });
+
+      // The edge function returns base64 content in repairedFile
+      if (data.repairedFile) {
+        // Convert base64 to blob for download
+        try {
+          const binaryString = atob(data.repairedFile);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'application/octet-stream' });
+          data.repairedFileBlob = blob;
+          console.log('Created blob with size:', blob.size);
+        } catch (decodeError) {
+          console.error('Error decoding base64:', decodeError);
+          // Fallback: treat as plain text
+          const blob = new Blob([data.repairedFile], { type: 'text/plain' });
+          data.repairedFileBlob = blob;
+        }
       }
 
       return data as RepairResult;
 
     } catch (error) {
       console.error('File processing error:', error);
-      return {
-        success: false,
-        fileName: file.name,
-        fileType: (ACCEPTED_TYPES[file.type as keyof typeof ACCEPTED_TYPES] as 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF') || undefined,
-        status: 'failed',
-        issues: [`Processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`]
-      };
+      throw new Error(`Failed to send a request to the Edge Function`);
     }
   };
 

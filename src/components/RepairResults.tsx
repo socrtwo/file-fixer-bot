@@ -21,7 +21,8 @@ interface RepairResult {
   fileName: string;
   status: 'success' | 'partial' | 'failed';
   issues?: string[];
-  repairedFile?: Blob;
+  repairedFile?: string; // base64 string from edge function
+  repairedFileBlob?: Blob; // converted blob for download
   repairedFileV2?: Blob;
   repairedFileUrl?: string;
   downloadUrl?: string;
@@ -32,11 +33,15 @@ interface RepairResult {
     recoveredFiles?: string[];
     fileSize?: number;
   };
-  fileType?: 'DOCX' | 'XLSX' | 'PPTX';
+  fileType?: 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF' | 'txt';
   recoveryStats?: {
     totalFiles: number;
     recoveredFiles: number;
     corruptedFiles: number;
+    originalSize?: number;
+    repairedSize?: number;
+    corruptionLevel?: string;
+    recoveredData?: number;
   };
 }
 
@@ -57,6 +62,15 @@ export const RepairResults = ({ result, onReset }: RepairResultsProps) => {
   const downloadRepairedFile = () => {
     if (result.downloadUrl || result.repairedFileUrl) {
       window.open(result.downloadUrl || result.repairedFileUrl, '_blank');
+    } else if (result.repairedFileBlob) {
+      const url = URL.createObjectURL(result.repairedFileBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `repaired_${result.fileName}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     } else if (result.repairedFileV2) {
       const url = URL.createObjectURL(result.repairedFileV2);
       const a = document.createElement('a');
@@ -67,14 +81,35 @@ export const RepairResults = ({ result, onReset }: RepairResultsProps) => {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } else if (result.repairedFile) {
-      const url = URL.createObjectURL(result.repairedFile);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `repaired_${result.fileName}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Handle base64 string - convert to blob first
+      try {
+        const binaryString = atob(result.repairedFile);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `repaired_${result.fileName}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error('Error downloading file:', error);
+        // Fallback: treat as text
+        const blob = new Blob([result.repairedFile], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `repaired_${result.fileName}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
     }
   };
 
@@ -132,7 +167,7 @@ export const RepairResults = ({ result, onReset }: RepairResultsProps) => {
               {getStatusIcon(result.status)}
               <h3 className="text-xl font-semibold mt-4">{getStatusMessage(result.status)}</h3>
               <p className="text-muted-foreground mt-2">
-                {result.fileName} - {formatFileSize(result.preview?.fileSize || result.repairedFile?.size || result.repairedFileV2?.size || 0)}
+                {result.fileName} - {formatFileSize(result.preview?.fileSize || result.repairedFileBlob?.size || result.repairedFileV2?.size || result.recoveryStats?.repairedSize || 0)}
               </p>
               {result.fileType && (
                 <Badge variant="outline" className="mt-2">

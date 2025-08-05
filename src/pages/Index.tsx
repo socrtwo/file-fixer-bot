@@ -10,7 +10,8 @@ interface RepairResult {
   fileName: string;
   status: 'success' | 'partial' | 'failed';
   issues?: string[];
-  repairedFile?: Blob;
+  repairedFile?: string; // base64 string from edge function
+  repairedFileBlob?: Blob; // converted blob for download
   repairedFileV2?: Blob;
   repairedFileUrl?: string;
   downloadUrl?: string;
@@ -21,11 +22,15 @@ interface RepairResult {
     recoveredFiles?: string[];
     fileSize?: number;
   };
-  fileType?: 'DOCX' | 'XLSX' | 'PPTX';
+  fileType?: 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF' | 'txt';
   recoveryStats?: {
     totalFiles: number;
     recoveredFiles: number;
     corruptedFiles: number;
+    originalSize?: number;
+    repairedSize?: number;
+    corruptionLevel?: string;
+    recoveredData?: number;
   };
 }
 

@@ -24,7 +24,7 @@ interface RepairResult {
     recoveredFiles?: string[];
     fileSize?: number;
   };
-  fileType?: 'DOCX' | 'XLSX' | 'PPTX';
+  fileType?: 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF';
   recoveryStats?: {
     totalFiles: number;
     recoveredFiles: number;
@@ -55,12 +55,15 @@ serve(async (req) => {
     const allowedTypes = [
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
-      'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'application/zip',
+      'application/x-zip-compressed',
+      'application/pdf'
     ];
 
     if (!allowedTypes.includes(file.type)) {
       return new Response(JSON.stringify({ 
-        error: 'Unsupported file type. Only DOCX, XLSX, and PPTX files are supported.' 
+        error: 'Unsupported file type. Only DOCX, XLSX, PPTX, ZIP, and PDF files are supported.' 
       }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -171,17 +174,19 @@ serve(async (req) => {
   }
 });
 
-function getFileType(mimeType: string): 'DOCX' | 'XLSX' | 'PPTX' {
+function getFileType(mimeType: string): 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF' {
   if (mimeType.includes('wordprocessingml')) return 'DOCX';
   if (mimeType.includes('spreadsheetml')) return 'XLSX';
   if (mimeType.includes('presentationml')) return 'PPTX';
+  if (mimeType.includes('zip')) return 'ZIP';
+  if (mimeType.includes('pdf')) return 'PDF';
   return 'DOCX'; // Default fallback
 }
 
 // Format-specific repair function
 async function repairOfficeFile(
   fileData: ArrayBuffer, 
-  fileType: 'DOCX' | 'XLSX' | 'PPTX', 
+  fileType: 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF', 
   fileName: string
 ): Promise<{
   data: Uint8Array;
@@ -198,6 +203,10 @@ async function repairOfficeFile(
       return await repairXlsx(fileData, issues);
     case 'PPTX':
       return await repairPptx(fileData, issues);
+    case 'ZIP':
+      return await repairZip(fileData, issues);
+    case 'PDF':
+      return await repairPdf(fileData, issues);
     default:
       throw new Error(`Unsupported file type: ${fileType}`);
   }
@@ -241,7 +250,14 @@ async function repairDocx(
           // Extract document content for preview
           if (path === 'word/document.xml') {
             const xmlContent = await file.async('string');
-            documentContent = extractTextFromDocumentXml(xmlContent);
+            const repairedXml = repairDocumentXml(xmlContent);
+            documentContent = extractTextFromDocumentXml(repairedXml);
+            
+            // If we repaired the XML, update it in the zip
+            if (repairedXml !== xmlContent) {
+              newZip.file(path, repairedXml);
+              issues.push('Repaired corrupted document.xml with XML tag fixes');
+            }
           }
         } catch (e) {
           stats.corruptedFiles++;
@@ -522,6 +538,159 @@ async function advancedZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
       zipfile.readEntry();
     });
   });
+}
+
+// ZIP-specific repair
+async function repairZip(
+  fileData: ArrayBuffer, 
+  issues: string[]
+): Promise<{
+  data: Uint8Array;
+  preview: any;
+  stats: { totalFiles: number; recoveredFiles: number; corruptedFiles: number };
+  issues: string[];
+}> {
+  const stats = { totalFiles: 0, recoveredFiles: 0, corruptedFiles: 0 };
+  
+  try {
+    // Use yauzl for robust ZIP extraction
+    const repairedData = await advancedZipRepair(fileData);
+    
+    // Count recovered files by re-reading the repaired ZIP
+    const zip = await JSZip.loadAsync(repairedData);
+    const recoveredFiles: string[] = [];
+    
+    for (const [path, file] of Object.entries(zip.files)) {
+      if (!file.dir) {
+        stats.totalFiles++;
+        stats.recoveredFiles++;
+        recoveredFiles.push(path);
+      }
+    }
+    
+    const preview = {
+      recoveredFiles,
+      fileSize: repairedData.length,
+      content: `ZIP archive with ${recoveredFiles.length} recovered files`
+    };
+    
+    return { data: repairedData, preview, stats, issues };
+  } catch (error) {
+    throw new Error(`ZIP repair failed: ${error.message}`);
+  }
+}
+
+// PDF-specific repair
+async function repairPdf(
+  fileData: ArrayBuffer, 
+  issues: string[]
+): Promise<{
+  data: Uint8Array;
+  preview: any;
+  stats: { totalFiles: number; recoveredFiles: number; corruptedFiles: number };
+  issues: string[];
+}> {
+  const stats = { totalFiles: 1, recoveredFiles: 0, corruptedFiles: 0 };
+  
+  try {
+    const uint8Array = new Uint8Array(fileData);
+    
+    // Basic PDF repair - find PDF header and trailer
+    const pdfHeader = '%PDF-';
+    const pdfTrailer = '%%EOF';
+    
+    let headerIndex = -1;
+    let trailerIndex = -1;
+    
+    // Find PDF header
+    for (let i = 0; i <= uint8Array.length - 5; i++) {
+      const chunk = new TextDecoder().decode(uint8Array.slice(i, i + 5));
+      if (chunk === pdfHeader) {
+        headerIndex = i;
+        break;
+      }
+    }
+    
+    // Find PDF trailer (search from end)
+    for (let i = uint8Array.length - 5; i >= 0; i--) {
+      const chunk = new TextDecoder().decode(uint8Array.slice(i, i + 5));
+      if (chunk === pdfTrailer) {
+        trailerIndex = i + 5;
+        break;
+      }
+    }
+    
+    let repairedData = uint8Array;
+    
+    if (headerIndex > 0) {
+      // Remove garbage before PDF header
+      repairedData = uint8Array.slice(headerIndex);
+      issues.push('Removed garbage data before PDF header');
+    }
+    
+    if (trailerIndex > 0 && trailerIndex < repairedData.length) {
+      // Truncate after EOF marker
+      repairedData = repairedData.slice(0, trailerIndex - headerIndex);
+      issues.push('Truncated data after PDF EOF marker');
+    }
+    
+    if (headerIndex >= 0) {
+      stats.recoveredFiles = 1;
+    } else {
+      stats.corruptedFiles = 1;
+      issues.push('PDF header not found - file may be severely corrupted');
+    }
+    
+    const preview = {
+      fileSize: repairedData.length,
+      content: `PDF document (${(repairedData.length / 1024).toFixed(1)} KB)`
+    };
+    
+    return { data: repairedData, preview, stats, issues };
+  } catch (error) {
+    throw new Error(`PDF repair failed: ${error.message}`);
+  }
+}
+
+// XML repair function for document.xml
+function repairDocumentXml(xmlContent: string): string {
+  try {
+    // Parse the XML to find content
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlContent, 'text/xml');
+    
+    // If parsing fails, try to truncate to last valid paragraph
+    if (doc.querySelector('parsererror')) {
+      // Find the last complete paragraph tag
+      const lastParagraphMatch = xmlContent.lastIndexOf('</w:p>');
+      if (lastParagraphMatch !== -1) {
+        const truncatedContent = xmlContent.substring(0, lastParagraphMatch + 6);
+        // Add closing tags if needed
+        let repaired = truncatedContent;
+        if (!repaired.includes('</w:body>')) {
+          repaired += '</w:body>';
+        }
+        if (!repaired.includes('</w:document>')) {
+          repaired += '</w:document>';
+        }
+        return repaired;
+      }
+    }
+    
+    return xmlContent;
+  } catch {
+    // Fallback: create minimal document.xml
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r>
+        <w:t>Document recovered with minimal content.</w:t>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>`;
+  }
 }
 
 async function rebuildZipFromExtractedFiles(extractedFiles: { [key: string]: Buffer }): Promise<ArrayBuffer> {

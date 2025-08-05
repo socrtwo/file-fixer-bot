@@ -14,19 +14,31 @@ interface FileUploadProps {
 interface RepairResult {
   success: boolean;
   fileName: string;
-  fileType: string;
-  originalSize: number;
-  repairedSize?: number;
-  issues?: string[];
-  repairedFile?: Blob;
-  repairedFileV2?: Blob;
   status: 'success' | 'partial' | 'failed';
+  issues?: string[];
+  downloadUrl?: string;
+  preview?: {
+    content?: string;
+    extractedSheets?: string[];
+    extractedSlides?: number;
+    recoveredFiles?: string[];
+    fileSize?: number;
+  };
+  fileType?: 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF';
+  recoveryStats?: {
+    totalFiles: number;
+    recoveredFiles: number;
+    corruptedFiles: number;
+  };
 }
 
 const ACCEPTED_TYPES = {
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx'
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
+  'application/zip': 'ZIP',
+  'application/x-zip-compressed': 'ZIP',
+  'application/pdf': 'PDF'
 };
 
 export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
@@ -38,9 +50,9 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
 
   const getFileIcon = (type: string) => {
     switch (type) {
-      case 'docx': return <FileText className="w-8 h-8 text-primary" />;
-      case 'xlsx': return <Table className="w-8 h-8 text-accent" />;
-      case 'pptx': return <Presentation className="w-8 h-8 text-warning" />;
+      case 'DOCX': return <FileText className="w-8 h-8 text-primary" />;
+      case 'XLSX': return <Table className="w-8 h-8 text-accent" />;
+      case 'PPTX': return <Presentation className="w-8 h-8 text-warning" />;
       default: return <FileText className="w-8 h-8 text-muted-foreground" />;
     }
   };
@@ -151,8 +163,7 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
       return {
         success: false,
         fileName: file.name,
-        fileType: ACCEPTED_TYPES[file.type as keyof typeof ACCEPTED_TYPES] || 'Unknown',
-        originalSize: file.size,
+        fileType: (ACCEPTED_TYPES[file.type as keyof typeof ACCEPTED_TYPES] as 'DOCX' | 'XLSX' | 'PPTX' | 'ZIP' | 'PDF') || undefined,
         status: 'failed',
         issues: [`Processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`]
       };
@@ -281,7 +292,7 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
     if (!Object.keys(ACCEPTED_TYPES).includes(file.type)) {
       toast({
         title: "Invalid file type",
-        description: "Please upload a DOCX, XLSX, or PPTX file.",
+        description: "Please upload a DOCX, XLSX, PPTX, ZIP, or PDF file.",
         variant: "destructive",
       });
       return;
@@ -369,9 +380,9 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
               </div>
               
               <div className="space-y-2">
-                <h3 className="text-lg font-semibold">Upload Corrupted Office File</h3>
+                <h3 className="text-lg font-semibold">Upload Corrupted File</h3>
                 <p className="text-sm text-muted-foreground">
-                  Drop your DOCX, XLSX, or PPTX file here or click to browse
+                  Drop your DOCX, XLSX, PPTX, ZIP, or PDF file here or click to browse
                 </p>
               </div>
               
@@ -379,6 +390,8 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
                 <Badge variant="outline">Microsoft Word</Badge>
                 <Badge variant="outline">Microsoft Excel</Badge>
                 <Badge variant="outline">Microsoft PowerPoint</Badge>
+                <Badge variant="outline">ZIP Archives</Badge>
+                <Badge variant="outline">PDF Documents</Badge>
               </div>
               
               <Button
@@ -395,7 +408,7 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
             ref={fileInputRef}
             type="file"
             className="hidden"
-            accept=".docx,.xlsx,.pptx"
+            accept=".docx,.xlsx,.pptx,.zip,.pdf"
             onChange={(e) => handleFileSelect(e.target.files)}
           />
         </div>

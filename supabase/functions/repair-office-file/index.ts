@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import StreamZip from 'https://esm.sh/node-stream-zip@1.15.0';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -141,51 +142,59 @@ serve(async (req) => {
 });
 
 async function advancedZipRepair(arrayBuffer: ArrayBuffer, issues: string[]): Promise<ArrayBuffer | null> {
-  const data = new Uint8Array(arrayBuffer);
+  console.log('Using node-stream-zip for ZIP repair...');
   
-  // ZIP file signatures
-  const LOCAL_FILE_HEADER = [0x50, 0x4B, 0x03, 0x04];
-  const CENTRAL_DIR_HEADER = [0x50, 0x4B, 0x01, 0x02];
-  const END_CENTRAL_DIR = [0x50, 0x4B, 0x05, 0x06];
-  
-  console.log('Scanning for ZIP structures...');
-  
-  // Find all local file headers
-  const localHeaders: number[] = [];
-  for (let i = 0; i <= data.length - 4; i++) {
-    if (data[i] === LOCAL_FILE_HEADER[0] && 
-        data[i + 1] === LOCAL_FILE_HEADER[1] && 
-        data[i + 2] === LOCAL_FILE_HEADER[2] && 
-        data[i + 3] === LOCAL_FILE_HEADER[3]) {
-      localHeaders.push(i);
-    }
-  }
-  
-  if (localHeaders.length === 0) {
-    issues.push('No valid ZIP headers found');
-    return null;
-  }
-  
-  console.log(`Found ${localHeaders.length} local file headers`);
-  issues.push(`Found ${localHeaders.length} recoverable files`);
-  
-  // Start rebuilding from the first valid header
-  const startOffset = localHeaders[0];
-  let repairedData = data.slice(startOffset);
-  
-  // Try to reconstruct central directory if missing/corrupted
   try {
-    const centralDirStart = findCentralDirectory(repairedData);
-    if (centralDirStart === -1) {
-      console.log('Central directory corrupted, attempting reconstruction...');
-      repairedData = await reconstructZipStructure(repairedData, issues);
+    // Write the corrupted file to a temporary buffer
+    const tempBuffer = Buffer.from(arrayBuffer);
+    
+    // Try to extract files using node-stream-zip with error tolerance
+    const zip = new StreamZip.async({ 
+      buffer: tempBuffer,
+      skipEntryNameValidation: true,
+      skipValidateEntry: true
+    });
+    
+    console.log('Successfully opened ZIP with node-stream-zip');
+    
+    // Get entries from the ZIP
+    const entries = await zip.entries();
+    const entryNames = Object.keys(entries);
+    
+    console.log(`Found ${entryNames.length} entries in ZIP`);
+    issues.push(`Extracted ${entryNames.length} files from corrupted ZIP`);
+    
+    // Extract and repair each file
+    const extractedFiles: { [key: string]: Buffer } = {};
+    
+    for (const entryName of entryNames) {
+      try {
+        const data = await zip.entryData(entryName);
+        extractedFiles[entryName] = Buffer.from(data);
+        console.log(`Extracted: ${entryName} (${data.length} bytes)`);
+      } catch (error) {
+        console.log(`Failed to extract ${entryName}: ${error.message}`);
+        issues.push(`Could not extract ${entryName}: ${error.message}`);
+      }
     }
+    
+    await zip.close();
+    
+    // If we extracted files, rebuild the ZIP
+    if (Object.keys(extractedFiles).length > 0) {
+      return await rebuildZipFromExtractedFiles(extractedFiles, issues);
+    } else {
+      issues.push('No files could be extracted from ZIP');
+      return null;
+    }
+    
   } catch (error) {
-    console.log('Error finding central directory, reconstructing...');
-    repairedData = await reconstructZipStructure(repairedData, issues);
+    console.log(`node-stream-zip failed: ${error.message}`);
+    issues.push(`ZIP extraction failed: ${error.message}`);
+    
+    // Fallback to manual header scanning
+    return await fallbackZipRepair(arrayBuffer, issues);
   }
-  
-  return repairedData.buffer.slice(repairedData.byteOffset, repairedData.byteOffset + repairedData.byteLength);
 }
 
 function findCentralDirectory(data: Uint8Array): number {
@@ -207,6 +216,89 @@ function findCentralDirectory(data: Uint8Array): number {
     }
   }
   return -1;
+}
+
+async function rebuildZipFromExtractedFiles(extractedFiles: { [key: string]: Buffer }, issues: string[]): Promise<ArrayBuffer> {
+  // Import JSZip to rebuild the ZIP
+  const JSZip = (await import('https://esm.sh/jszip@3.10.1')).default;
+  
+  const zip = new JSZip();
+  
+  // Add each extracted file to the new ZIP, repairing XML content as we go
+  for (const [fileName, fileData] of Object.entries(extractedFiles)) {
+    try {
+      if (fileName.endsWith('.xml') || fileName.endsWith('.rels')) {
+        // Repair XML content
+        const content = fileData.toString('utf-8');
+        const repairedContent = repairXmlContent(content);
+        
+        if (content !== repairedContent) {
+          issues.push(`Repaired XML in ${fileName}`);
+        }
+        
+        zip.file(fileName, repairedContent);
+      } else {
+        // Add binary file as-is
+        zip.file(fileName, fileData);
+      }
+    } catch (error) {
+      console.log(`Error processing ${fileName}: ${error.message}`);
+      issues.push(`Could not process ${fileName}: ${error.message}`);
+    }
+  }
+  
+  // Generate the repaired ZIP
+  return await zip.generateAsync({
+    type: 'arraybuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 }
+  });
+}
+
+async function fallbackZipRepair(arrayBuffer: ArrayBuffer, issues: string[]): Promise<ArrayBuffer | null> {
+  const data = new Uint8Array(arrayBuffer);
+  
+  // ZIP file signatures
+  const LOCAL_FILE_HEADER = [0x50, 0x4B, 0x03, 0x04];
+  
+  console.log('Falling back to manual ZIP header scanning...');
+  
+  // Find all local file headers
+  const localHeaders: number[] = [];
+  for (let i = 0; i <= data.length - 4; i++) {
+    if (data[i] === LOCAL_FILE_HEADER[0] && 
+        data[i + 1] === LOCAL_FILE_HEADER[1] && 
+        data[i + 2] === LOCAL_FILE_HEADER[2] && 
+        data[i + 3] === LOCAL_FILE_HEADER[3]) {
+      localHeaders.push(i);
+    }
+  }
+  
+  if (localHeaders.length === 0) {
+    issues.push('No valid ZIP headers found in fallback scan');
+    return null;
+  }
+  
+  console.log(`Fallback found ${localHeaders.length} local file headers`);
+  issues.push(`Fallback recovery found ${localHeaders.length} files`);
+  
+  // Start rebuilding from the first valid header
+  const startOffset = localHeaders[0];
+  let repairedData = data.slice(startOffset);
+  
+  // Try to reconstruct central directory if missing/corrupted
+  try {
+    const centralDirStart = findCentralDirectory(repairedData);
+    if (centralDirStart === -1) {
+      console.log('Central directory corrupted, attempting reconstruction...');
+      repairedData = await reconstructZipStructure(repairedData, issues);
+    }
+  } catch (error) {
+    console.log('Error finding central directory, reconstructing...');
+    repairedData = await reconstructZipStructure(repairedData, issues);
+  }
+  
+  return repairedData.buffer.slice(repairedData.byteOffset, repairedData.byteOffset + repairedData.byteLength);
 }
 
 async function reconstructZipStructure(data: Uint8Array, issues: string[]): Promise<Uint8Array> {

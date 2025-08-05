@@ -207,31 +207,44 @@ function extractTextFromRawData(data: Uint8Array): string {
   console.log('Extracting text from raw data...');
   
   try {
-    // Convert to string and look for readable text
-    const str = String.fromCharCode(...data);
+    // Process in chunks to avoid stack overflow for large files
+    const chunkSize = 50000;
+    let extractedText = '';
     
-    // Look for text patterns - extract anything that looks like readable content
-    let extractedText = str
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\xFF]/g, ' ') // Remove non-printable chars
-      .replace(/\s+/g, ' ') // Normalize whitespace
+    for (let i = 0; i < data.length; i += chunkSize) {
+      const chunk = data.slice(i, Math.min(i + chunkSize, data.length));
+      
+      // Convert chunk to string and extract readable content
+      const str = Array.from(chunk)
+        .map(byte => byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : ' ')
+        .join('');
+      
+      // Look for meaningful text patterns
+      const words = str.match(/[a-zA-Z]{3,}/g);
+      if (words && words.length > 5) {
+        extractedText += words.join(' ') + ' ';
+      }
+      
+      // Stop if we've found enough content
+      if (extractedText.length > 2000) break;
+    }
+    
+    // Clean up the extracted text
+    extractedText = extractedText
+      .replace(/\s+/g, ' ')
       .trim();
     
-    // Much more strict filtering - sentences must have common English words
-    const commonWords = /\b(the|and|or|but|in|on|at|to|for|of|with|by|from|up|about|into|through|during|before|after|above|below|between|among|around|under|over|since|until|while|because|although|unless|if|when|where|what|who|which|how|why|this|that|these|those|some|many|few|several|all|most|each|every|both|either|neither|one|two|three|first|second|third|last|next|previous|other|another|same|different|new|old|good|bad|big|small|long|short|high|low|early|late|here|there|now|then|today|tomorrow|yesterday)\b/i;
-    
+    // Filter for meaningful sentences
     const sentences = extractedText.split(/[.!?]+/)
       .map(s => s.trim())
-      .filter(s => s.length > 20) // Longer minimum length
+      .filter(s => s.length > 15)
       .filter(s => /[a-zA-Z]/.test(s))
-      .filter(s => commonWords.test(s)) // Must contain common English words
-      .filter(s => (s.match(/[a-zA-Z]/g) || []).length > s.length * 0.5) // At least 50% alphabetic
-      .filter(s => !/^[^a-zA-Z]*$/.test(s)); // Remove lines with only symbols/numbers
+      .filter(s => (s.match(/[a-zA-Z]/g) || []).length > s.length * 0.6);
     
-    // Only accept if we have truly meaningful content
-    if (sentences.length >= 5 && sentences.join('').length > 200) {
-      extractedText = sentences.join('. ').substring(0, 5000);
-      console.log(`Found ${sentences.length} meaningful sentences`);
-      return extractedText;
+    if (sentences.length >= 3) {
+      const result = sentences.slice(0, 20).join('. ').substring(0, 3000);
+      console.log(`Found ${sentences.length} meaningful sentences from raw data`);
+      return result;
     }
     
     console.log('No meaningful readable text found in raw data');

@@ -543,65 +543,49 @@ async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
   
   console.log(`Found ${localFileHeaders.length} potential file headers`);
   
-  // Step 2: Parse each local file header manually and decompress
+  // Step 2: Extract files and rebuild using JSZip for proper decompression
+  const newZip = new JSZip();
+  let recoveredCount = 0;
+  
   for (const headerOffset of localFileHeaders) {
     try {
       const fileInfo = parseLocalFileHeader(uint8Array, headerOffset);
-      if (fileInfo && fileInfo.filename && fileInfo.data) {
-        // Handle decompression if needed
-        let finalData = fileInfo.data;
-        
-        if (fileInfo.compressionMethod === 8) {
-          // Deflate compression - attempt decompression
-          try {
-            finalData = await decompressDeflate(fileInfo.data);
-            console.log(`Recovered file: ${fileInfo.filename} (${finalData.length} bytes)`);
-          } catch (error) {
-            console.log(`Keeping compressed data for ${fileInfo.filename} (deflate)`);
-            finalData = fileInfo.data;
-          }
-        } else {
-          console.log(`Recovered file: ${fileInfo.filename} (${finalData.length} bytes)`);
-        }
-        
-        extractedFiles[fileInfo.filename] = finalData;
+      if (fileInfo && fileInfo.filename && fileInfo.data && !fileInfo.filename.endsWith('/')) {
+        // Add to new ZIP - JSZip will handle decompression automatically
+        newZip.file(fileInfo.filename, fileInfo.data);
+        recoveredCount++;
+        console.log(`Recovered file: ${fileInfo.filename} (${fileInfo.data.length} bytes)`);
       }
     } catch (error) {
       console.log(`Failed to parse header at offset ${headerOffset}:`, error.message);
     }
   }
   
-  if (Object.keys(extractedFiles).length === 0) {
+  if (recoveredCount === 0) {
     throw new Error('No files could be recovered from corrupt ZIP');
   }
   
-  console.log(`Successfully recovered ${Object.keys(extractedFiles).length} files`);
-  return new Uint8Array(await rebuildZipFromExtractedFiles(extractedFiles));
+  console.log(`Successfully recovered ${recoveredCount} files`);
+  
+  // Generate new ZIP with proper compression handling
+  const repairedZip = await newZip.generateAsync({ 
+    type: 'uint8array',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 }
+  });
+  
+  return repairedZip;
 }
 
 // Parse ZIP local file header manually (mimics zip -FF behavior)
-function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: string; data: Uint8Array; compressionMethod: number; compressedSize: number } | null {
+function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: string; data: Uint8Array } | null {
   try {
-    // Local file header structure:
-    // 0-3: signature (0x04034b50)
-    // 4-5: version needed
-    // 6-7: flags
-    // 8-9: compression method
-    // 10-13: last mod time/date
-    // 14-17: crc32
-    // 18-21: compressed size
-    // 22-25: uncompressed size
-    // 26-27: filename length
-    // 28-29: extra field length
-    // 30+: filename + extra field + data
-    
     if (offset + 30 > data.length) return null;
     
     const filenameLength = data[offset + 26] | (data[offset + 27] << 8);
     const extraFieldLength = data[offset + 28] | (data[offset + 29] << 8);
     const compressedSize = (data[offset + 18] | (data[offset + 19] << 8) | 
                            (data[offset + 20] << 16) | (data[offset + 21] << 24)) >>> 0;
-    const compressionMethod = data[offset + 8] | (data[offset + 9] << 8);
     
     const filenameStart = offset + 30;
     const dataStart = filenameStart + filenameLength + extraFieldLength;
@@ -616,10 +600,9 @@ function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: str
     // Extract file data
     let fileData: Uint8Array;
     if (compressedSize > 0 && dataStart + compressedSize <= data.length) {
-      // Use specified compressed size
       fileData = data.slice(dataStart, dataStart + compressedSize);
     } else {
-      // Size is corrupted or missing, find next header or use remaining data
+      // Size corrupted, find next header or use remaining data
       let endOffset = data.length;
       for (let i = dataStart + 1; i < data.length - 4; i++) {
         if (data[i] === 0x50 && data[i+1] === 0x4b && 
@@ -631,64 +614,12 @@ function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: str
       fileData = data.slice(dataStart, endOffset);
     }
     
-    // Return raw data with compression info for later processing
-    return { 
-      filename, 
-      data: fileData, 
-      compressionMethod, 
-      compressedSize 
-    };
+    return { filename, data: fileData };
   } catch (error) {
     return null;
   }
 }
 
-// Simple deflate decompression using built-in DecompressionStream
-async function decompressDeflate(compressedData: Uint8Array): Promise<Uint8Array> {
-  try {
-    console.log(`Attempting to decompress ${compressedData.length} bytes`);
-    
-    // Check if DecompressionStream is available
-    if (typeof DecompressionStream === 'undefined') {
-      console.log('DecompressionStream not available, returning compressed data');
-      return compressedData;
-    }
-    
-    const stream = new DecompressionStream('deflate-raw');
-    const writer = stream.writable.getWriter();
-    const reader = stream.readable.getReader();
-    
-    // Write compressed data
-    await writer.write(compressedData);
-    await writer.close();
-    
-    // Read decompressed data
-    const chunks: Uint8Array[] = [];
-    
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) {
-        chunks.push(new Uint8Array(value));
-      }
-    }
-    
-    // Combine chunks
-    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      result.set(chunk, offset);
-      offset += chunk.length;
-    }
-    
-    console.log(`Decompressed to ${result.length} bytes`);
-    return result;
-  } catch (error) {
-    console.log(`Decompression failed: ${error.message}, returning compressed data`);
-    return compressedData;
-  }
-}
 
 // ZIP-specific repair
 async function repairZip(

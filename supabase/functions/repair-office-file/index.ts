@@ -196,23 +196,25 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
   try {
     const JSZip = (await import('https://esm.sh/jszip@3.10.1')).default;
     
-    // Try to load as ZIP with different options to handle corruption
+    // Try to load as ZIP with more lenient options for corrupted files
     let zip;
     try {
-      zip = await JSZip.loadAsync(data, { checkCRC32: false, optimizedBinaryString: false });
-    } catch (e) {
-      // Try with more lenient options
-      console.log('Standard ZIP load failed, trying repair mode...');
       zip = await JSZip.loadAsync(data, { 
         checkCRC32: false, 
         optimizedBinaryString: false,
-        createFolders: false 
+        createFolders: false,
+        decodeFileName: function(bytes) {
+          return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+        }
       });
+    } catch (e) {
+      console.log('ZIP load failed completely:', e.message);
+      return '';
     }
     
     console.log('ZIP structure loaded for repair');
     const files = Object.keys(zip.files);
-    console.log(`Document contains ${files.length} internal files`);
+    console.log(`Document contains ${files.length} internal files:`, files);
     
     let repairedContent = '';
     
@@ -220,14 +222,26 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
     if (zip.files['word/document.xml']) {
       console.log('Found Word document content');
       try {
-        const docXml = await zip.files['word/document.xml'].async('string');
+        const docXml = await zip.files['word/document.xml'].async('text');
+        console.log('Word document XML loaded, length:', docXml.length);
         const textContent = extractTextFromXml(docXml);
-        if (textContent.length > 100) {
+        if (textContent.length > 50) {
           repairedContent = textContent;
           console.log(`Extracted ${textContent.length} characters from Word document`);
         }
       } catch (e) {
-        console.log('Failed to extract Word content:', e.message);
+        console.log('Failed to extract Word content, trying binary mode:', e.message);
+        try {
+          const docData = await zip.files['word/document.xml'].async('uint8array');
+          const docXml = new TextDecoder('utf-8', { fatal: false }).decode(docData);
+          const textContent = extractTextFromXml(docXml);
+          if (textContent.length > 50) {
+            repairedContent = textContent;
+            console.log(`Extracted ${textContent.length} characters from Word document (binary mode)`);
+          }
+        } catch (e2) {
+          console.log('Binary mode also failed:', e2.message);
+        }
       }
     }
     
@@ -237,7 +251,7 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
       for (const filename of Object.keys(zip.files)) {
         if (filename.startsWith('xl/worksheets/') && filename.endsWith('.xml')) {
           try {
-            const sheetXml = await zip.files[filename].async('string');
+            const sheetXml = await zip.files[filename].async('text');
             const textContent = extractTextFromXml(sheetXml);
             if (textContent.length > 50) {
               repairedContent += textContent + '\n\n';
@@ -255,7 +269,7 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
       for (const filename of Object.keys(zip.files)) {
         if (filename.startsWith('ppt/slides/') && filename.endsWith('.xml')) {
           try {
-            const slideXml = await zip.files[filename].async('string');
+            const slideXml = await zip.files[filename].async('text');
             const textContent = extractTextFromXml(slideXml);
             if (textContent.length > 50) {
               repairedContent += textContent + '\n\n';
@@ -267,16 +281,17 @@ async function repairOfficeDocument(data: Uint8Array): Promise<string> {
       }
     }
     
-    // If main content extraction failed, try any XML files
+    // If main content extraction failed, try any XML files with more aggressive extraction
     if (!repairedContent) {
       console.log('Main content extraction failed, trying all XML files...');
       for (const filename of files) {
         if (filename.endsWith('.xml') && !zip.files[filename].dir) {
           try {
-            const content = await zip.files[filename].async('string');
+            const content = await zip.files[filename].async('text');
             const textContent = extractTextFromXml(content);
             if (textContent.length > 100) {
               repairedContent += textContent + '\n\n';
+              console.log(`Extracted content from ${filename}: ${textContent.length} chars`);
             }
           } catch (e) {
             console.log(`Could not read ${filename}:`, e.message);

@@ -670,31 +670,31 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
         // Third try: For corrupted deflate streams, try to extract readable content
         if (!decompressed && filename.endsWith('.xml')) {
           console.log(`Attempting manual XML recovery for ${filename}`);
-          try {
-            // Look for XML content in the compressed data
-            const textDecoder = new TextDecoder('utf-8', { fatal: false });
-            let recoveredContent = textDecoder.decode(compressedData);
-            
-            // If we find XML-like content, try to reconstruct it
-            if (recoveredContent.includes('<?xml') || recoveredContent.includes('<w:document') || recoveredContent.includes('<document')) {
-              // Create a minimal valid XML document
-              const xmlContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          
+          // Create appropriate XML content based on filename
+          let xmlContent = '';
+          if (filename === 'word/document.xml') {
+            xmlContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <w:body>
     <w:p>
       <w:r>
-        <w:t>Document content recovered from corrupted file.</w:t>
+        <w:t>Document content recovered from corrupted file. The original content could not be restored due to compression corruption.</w:t>
       </w:r>
     </w:p>
   </w:body>
 </w:document>`;
-              fileData = new TextEncoder().encode(xmlContent);
-              console.log(`Created replacement XML content for ${filename}: ${fileData.length} bytes`);
-              decompressed = true;
-            }
-          } catch (xmlError) {
-            console.log(`XML recovery failed for ${filename}:`, xmlError.message);
+          } else {
+            // Generic XML for other files
+            xmlContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<root>
+  <!-- File ${filename} recovered with minimal content -->
+</root>`;
           }
+          
+          fileData = new TextEncoder().encode(xmlContent);
+          console.log(`Created replacement XML content for ${filename}: ${fileData.length} bytes`);
+          decompressed = true;
         }
         
         if (!decompressed) {

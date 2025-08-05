@@ -551,8 +551,8 @@ async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
     try {
       const fileInfo = await parseLocalFileHeader(uint8Array, headerOffset);
       if (fileInfo && fileInfo.filename && fileInfo.data && !fileInfo.filename.endsWith('/')) {
-        // Add to new ZIP - JSZip will handle decompression automatically
-        newZip.file(fileInfo.filename, fileInfo.data);
+        // For ZIP repair, add the decompressed data to avoid JSZip auto-decompression issues
+        newZip.file(fileInfo.filename, fileInfo.data, { compression: 'STORE' });
         recoveredCount++;
         console.log(`Recovered file: ${fileInfo.filename} (${fileInfo.data.length} bytes)`);
       }
@@ -619,27 +619,27 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
     
     // Decompress data if needed
     let fileData: Uint8Array;
-    try {
-      if (compressionMethod === 8) { // DEFLATE compression
-        // Use built-in DecompressionStream for deflate
-        const decompressedStream = new Response(compressedData).body?.pipeThrough(
-          new DecompressionStream('deflate-raw')
-        );
-        if (decompressedStream) {
-          const response = new Response(decompressedStream);
-          const decompressedBuffer = await response.arrayBuffer();
-          fileData = new Uint8Array(decompressedBuffer);
-        } else {
-          fileData = compressedData; // Fallback to compressed data
-        }
-      } else if (compressionMethod === 0) { // No compression
-        fileData = compressedData;
-      } else {
-        // Unknown compression method, return compressed data
+    if (compressionMethod === 8) { // DEFLATE compression
+      try {
+        // Create a simple pako-like decompression using the native DecompressionStream
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(compressedData);
+            controller.close();
+          }
+        });
+        
+        const decompressedStream = stream.pipeThrough(new DecompressionStream('deflate'));
+        const response = new Response(decompressedStream);
+        const decompressedBuffer = await response.arrayBuffer();
+        fileData = new Uint8Array(decompressedBuffer);
+        console.log(`Decompressed ${filename}: ${compressedData.length} -> ${fileData.length} bytes`);
+      } catch (error) {
+        console.log(`Failed to decompress ${filename}, using compressed data:`, error.message);
         fileData = compressedData;
       }
-    } catch (decompressionError) {
-      console.log(`Failed to decompress ${filename}, using compressed data:`, decompressionError.message);
+    } else {
+      // No compression or unknown method
       fileData = compressedData;
     }
     

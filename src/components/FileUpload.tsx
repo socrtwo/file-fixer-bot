@@ -19,6 +19,7 @@ interface RepairResult {
   repairedSize?: number;
   issues?: string[];
   repairedFile?: Blob;
+  repairedFileV2?: Blob;
   status: 'success' | 'partial' | 'failed';
 }
 
@@ -44,16 +45,56 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
     }
   };
 
+  const repairDocumentXML = (content: string): string => {
+    try {
+      // Parse the XML to find content
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(content, 'text/xml');
+      
+      // If parsing fails, try to truncate to last valid paragraph
+      if (doc.querySelector('parsererror')) {
+        // Find the last complete paragraph tag
+        const lastParagraphMatch = content.lastIndexOf('</w:p>');
+        if (lastParagraphMatch !== -1) {
+          const truncatedContent = content.substring(0, lastParagraphMatch + 6);
+          // Add closing tags if needed
+          let repaired = truncatedContent;
+          if (!repaired.includes('</w:body>')) {
+            repaired += '</w:body>';
+          }
+          if (!repaired.includes('</w:document>')) {
+            repaired += '</w:document>';
+          }
+          return repaired;
+        }
+      }
+      
+      return content;
+    } catch {
+      // Fallback: create minimal document.xml
+      return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r>
+        <w:t>Document recovered with minimal content.</w:t>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>`;
+    }
+  };
+
   const validateAndRepairFile = async (file: File): Promise<RepairResult> => {
     setProgress(10);
     const fileType = ACCEPTED_TYPES[file.type as keyof typeof ACCEPTED_TYPES] || 'unknown';
     
     try {
-      setProgress(30);
+      setProgress(20);
       
       // Read the file as array buffer
       const arrayBuffer = await file.arrayBuffer();
-      setProgress(50);
+      setProgress(30);
       
       // Try to load as ZIP (Office files are ZIP archives)
       const zip = new JSZip();
@@ -61,7 +102,7 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
       
       try {
         zipContent = await zip.loadAsync(arrayBuffer);
-        setProgress(70);
+        setProgress(40);
       } catch (error) {
         // File is severely corrupted, try to extract what we can
         return {
@@ -74,16 +115,71 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
         };
       }
 
+      let repairedFileV1: Blob | undefined;
+      let repairedFileV2: Blob | undefined;
       const issues: string[] = [];
+
+      // For Word documents, create Version 1 with document.xml repair
+      if (fileType === 'docx') {
+        setProgress(50);
+        const v1Zip = new JSZip();
+        
+        // Copy all files and specifically repair document.xml
+        for (const [path, zipFile] of Object.entries(zipContent.files)) {
+          const file = zipFile as JSZip.JSZipObject;
+          if (file.dir) {
+            v1Zip.folder(path);
+          } else if (path === 'word/document.xml') {
+            try {
+              const content = await file.async('string');
+              const repairedContent = repairDocumentXML(content);
+              v1Zip.file(path, repairedContent);
+              if (content !== repairedContent) {
+                issues.push('document.xml was truncated/repaired');
+              }
+            } catch (error) {
+              // Create minimal document.xml if completely corrupted
+              const minimalDoc = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r>
+        <w:t>Document recovered. Original content was corrupted.</w:t>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>`;
+              v1Zip.file(path, minimalDoc);
+              issues.push('document.xml was completely replaced with minimal content');
+            }
+          } else {
+            try {
+              v1Zip.file(path, await file.async('arraybuffer'));
+            } catch {
+              // Skip corrupted files in V1
+            }
+          }
+        }
+        
+        setProgress(60);
+        
+        // Generate Version 1
+        const v1ArrayBuffer = await v1Zip.generateAsync({
+          type: 'arraybuffer',
+          compression: 'DEFLATE',
+          compressionOptions: { level: 6 }
+        });
+        repairedFileV1 = new Blob([v1ArrayBuffer], { type: file.type });
+      }
+
+      setProgress(70);
+
+      // Create Version 2 (original repair method)
       const repairedZip = new JSZip();
-      
-      // Check for essential files based on file type
       const essentialFiles = getEssentialFiles(fileType);
       const missingFiles: string[] = [];
       
-      setProgress(80);
-      
-      // Validate and repair structure
+      // Validate and repair structure (original method)
       for (const [path, zipFile] of Object.entries(zipContent.files)) {
         try {
           const file = zipFile as JSZip.JSZipObject;
@@ -131,14 +227,13 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
       
       setProgress(90);
       
-      // Generate repaired file
+      // Generate Version 2
       const repairedArrayBuffer = await repairedZip.generateAsync({
         type: 'arraybuffer',
         compression: 'DEFLATE',
         compressionOptions: { level: 6 }
       });
-      
-      const repairedBlob = new Blob([repairedArrayBuffer], { type: file.type });
+      repairedFileV2 = new Blob([repairedArrayBuffer], { type: file.type });
       
       setProgress(100);
       
@@ -150,9 +245,10 @@ export const FileUpload = ({ onFileProcessed }: FileUploadProps) => {
         fileName: file.name,
         fileType,
         originalSize: file.size,
-        repairedSize: repairedBlob.size,
+        repairedSize: fileType === 'docx' ? repairedFileV1?.size : repairedFileV2?.size,
         issues: issues.length > 0 ? issues : undefined,
-        repairedFile: repairedBlob,
+        repairedFile: fileType === 'docx' ? repairedFileV1 : repairedFileV2,
+        repairedFileV2: fileType === 'docx' ? repairedFileV2 : undefined,
         status
       };
       

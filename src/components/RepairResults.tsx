@@ -21,6 +21,7 @@ interface RepairResult {
   repairedSize?: number;
   issues?: string[];
   repairedFile?: Blob;
+  repairedFileV2?: Blob;
   status: 'success' | 'partial' | 'failed';
 }
 
@@ -38,13 +39,15 @@ export const RepairResults = ({ result, onReset }: RepairResultsProps) => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const downloadRepairedFile = () => {
-    if (!result.repairedFile) return;
+  const downloadRepairedFile = (version: 'v1' | 'v2' = 'v1') => {
+    const fileToDownload = version === 'v1' ? result.repairedFile : result.repairedFileV2;
+    if (!fileToDownload) return;
     
-    const url = URL.createObjectURL(result.repairedFile);
+    const url = URL.createObjectURL(fileToDownload);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `repaired_${result.fileName}`;
+    const versionSuffix = result.fileType === 'docx' && result.repairedFileV2 ? `_${version}` : '';
+    a.download = `repaired${versionSuffix}_${result.fileName}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -138,13 +141,25 @@ export const RepairResults = ({ result, onReset }: RepairResultsProps) => {
               <h4 className="font-medium text-sm text-muted-foreground">Actions</h4>
               <div className="flex flex-col gap-2">
                 {result.success && result.repairedFile && (
-                  <Button 
-                    onClick={downloadRepairedFile}
-                    className="bg-gradient-primary hover:shadow-medium transition-all duration-300"
-                  >
-                    <Download className="w-4 h-4 mr-2" />
-                    Download Repaired File
-                  </Button>
+                  <>
+                    <Button 
+                      onClick={() => downloadRepairedFile('v1')}
+                      className="bg-gradient-primary hover:shadow-medium transition-all duration-300"
+                    >
+                      <Download className="w-4 h-4 mr-2" />
+                      {result.fileType === 'docx' && result.repairedFileV2 ? 'Download V1 (Document XML Repair)' : 'Download Repaired File'}
+                    </Button>
+                    {result.fileType === 'docx' && result.repairedFileV2 && (
+                      <Button 
+                        onClick={() => downloadRepairedFile('v2')}
+                        variant="outline"
+                        className="hover:shadow-soft transition-all duration-300"
+                      >
+                        <Download className="w-4 h-4 mr-2" />
+                        Download V2 (Full Repair)
+                      </Button>
+                    )}
+                  </>
                 )}
                 <Button 
                   variant="outline" 

@@ -741,24 +741,22 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
             }
           }
           
-          // Try to extract partial content from raw compressed data
-          if (!decompressed) {
-            console.log(`Attempting partial data recovery for ${filename}`);
+          // Try XML truncation and repair for corrupted document.xml
+          if (!decompressed && filename === 'word/document.xml') {
+            console.log(`Attempting XML truncation and repair for ${filename}`);
             
             try {
-              // Look for readable text patterns in the compressed data
+              // Decode the raw data and try to parse as XML
               const rawText = new TextDecoder('utf-8', { fatal: false }).decode(compressedData);
-              const extractedText = extractReadableTextFromCorrupted(rawText);
+              const repairedXml = repairTruncatedXml(rawText);
               
-              if (extractedText.length > 20) {
-                // Create proper Word XML with recovered text
-                const xmlContent = createDocumentXmlWithContent(extractedText);
-                fileData = new TextEncoder().encode(xmlContent);
-                console.log(`Created document.xml with recovered text: ${extractedText.length} characters, ${fileData.length} bytes`);
+              if (repairedXml) {
+                fileData = new TextEncoder().encode(repairedXml);
+                console.log(`Created repaired document.xml: ${fileData.length} bytes`);
                 decompressed = true;
               }
-            } catch (textError) {
-              console.log(`Text extraction failed for ${filename}:`, textError.message);
+            } catch (xmlError) {
+              console.log(`XML repair failed for ${filename}:`, xmlError.message);
             }
           }
           
@@ -1022,6 +1020,101 @@ function createDocumentXmlWithContent(content: string): string {
 ${xmlParagraphs}
   </w:body>
 </w:document>`;
+}
+
+// Function to repair truncated XML by finding valid content and adding proper closing tags
+function repairTruncatedXml(rawData: string): string | null {
+  try {
+    // Look for XML content in the raw data
+    const xmlStartPattern = /<\?xml[^>]*>/;
+    const documentStartPattern = /<w:document[^>]*>/;
+    
+    let xmlContent = '';
+    
+    // Try to decode as text first
+    let textContent = rawData;
+    
+    // Look for XML patterns
+    const xmlStart = textContent.search(xmlStartPattern);
+    const docStart = textContent.search(documentStartPattern);
+    
+    if (xmlStart >= 0 || docStart >= 0) {
+      const startPos = xmlStart >= 0 ? xmlStart : docStart;
+      xmlContent = textContent.substring(startPos);
+      
+      // Remove clearly corrupted sections at the end
+      // Look for patterns that indicate corruption
+      const corruptionPatterns = [
+        /xml:space="preserv[^"]*[^>]*<w:p[^>]*>/g,
+        /HBAPESSE\s+RMLKHGB\s+tok\s+doublan/g,
+        /w:rsidR[^=]*=[^>]*\w+[^>]*>/g,
+        /dP=<w:sz/g,
+        /:rs$/g
+      ];
+      
+      let cleanedContent = xmlContent;
+      for (const pattern of corruptionPatterns) {
+        const match = cleanedContent.search(pattern);
+        if (match >= 0) {
+          console.log(`Found corruption pattern at position ${match}, truncating`);
+          cleanedContent = cleanedContent.substring(0, match);
+          break;
+        }
+      }
+      
+      // Find the last complete closing tag before corruption
+      const lastCompleteClosing = [
+        '</w:t>',
+        '</w:r>',
+        '</w:p>',
+        '</w:tc>',
+        '</w:tr>',
+        '</w:tbl>'
+      ];
+      
+      let bestTruncatePos = cleanedContent.length;
+      for (const closingTag of lastCompleteClosing) {
+        const lastPos = cleanedContent.lastIndexOf(closingTag);
+        if (lastPos >= 0) {
+          bestTruncatePos = lastPos + closingTag.length;
+          break;
+        }
+      }
+      
+      if (bestTruncatePos < cleanedContent.length) {
+        console.log(`Truncating at position ${bestTruncatePos} after last complete tag`);
+        cleanedContent = cleanedContent.substring(0, bestTruncatePos);
+      }
+      
+      // Add proper closing tags
+      if (!cleanedContent.includes('</w:body>')) {
+        cleanedContent += '\n  </w:body>';
+      }
+      if (!cleanedContent.includes('</w:document>')) {
+        cleanedContent += '\n</w:document>';
+      }
+      
+      // Validate that we have essential namespaces
+      if (!cleanedContent.includes('xmlns:w=')) {
+        cleanedContent = cleanedContent.replace(
+          '<w:document',
+          '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+        );
+      }
+      
+      // Ensure we have the XML declaration
+      if (!cleanedContent.includes('<?xml')) {
+        cleanedContent = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + cleanedContent;
+      }
+      
+      return cleanedContent;
+    }
+    
+    return null;
+  } catch (error) {
+    console.log('Error in repairTruncatedXml:', error.message);
+    return null;
+  }
 }
 
 async function rebuildZipFromExtractedFiles(extractedFiles: { [key: string]: Uint8Array }): Promise<ArrayBuffer> {

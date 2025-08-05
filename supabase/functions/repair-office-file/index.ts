@@ -523,11 +523,11 @@ async function advancedZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
 }
 
 async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> {
-  console.log('Using advanced binary ZIP repair (mimicking zip -FF)...');
-  console.log(`Input data size: ${arrayBuffer.byteLength} bytes`);
+  console.log('Using advanced binary ZIP repair...');
+  console.log('Input data size:', arrayBuffer.byteLength, 'bytes');
   
   const uint8Array = new Uint8Array(arrayBuffer);
-  const extractedFiles: { [key: string]: Uint8Array } = {};
+  const extractedFiles: Record<string, Uint8Array> = {};
   
   // Step 1: Scan for ZIP local file header signatures (0x04034b50)
   const localFileHeaders: number[] = [];
@@ -537,7 +537,7 @@ async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
     if (uint8Array[i] === 0x50 && uint8Array[i+1] === 0x4b && 
         uint8Array[i+2] === 0x03 && uint8Array[i+3] === 0x04) {
       localFileHeaders.push(i);
-      console.log(`Found ZIP signature at offset ${i}`);
+      console.log('Found ZIP signature at offset', i);
     }
   }
   
@@ -621,14 +621,9 @@ function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: str
       // Stored (no compression)
       return { filename, data: fileData };
     } else if (compressionMethod === 8) {
-      // Deflate compression - try to decompress
-      try {
-        const decompressed = await decompressDeflate(fileData);
-        return { filename, data: decompressed };
-      } catch (error) {
-        console.log(`Failed to decompress ${filename}, keeping compressed data`);
-        return { filename, data: fileData };
-      }
+      // Deflate compression - keep compressed for now (decompression would require async)
+      console.log(`Keeping compressed data for ${filename} (deflate)`);
+      return { filename, data: fileData };
     } else {
       // Unknown compression, keep as-is
       return { filename, data: fileData };

@@ -671,15 +671,47 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
         if (!decompressed && filename.endsWith('.xml')) {
           console.log(`Attempting manual XML recovery for ${filename}`);
           
+          // Try to extract any readable text from the corrupted data
+          let extractedText = '';
+          try {
+            // Look for readable ASCII/UTF-8 text in the compressed data
+            const textDecoder = new TextDecoder('utf-8', { fatal: false });
+            const rawText = textDecoder.decode(compressedData);
+            
+            // Extract any readable text sequences (letters, numbers, spaces, common punctuation)
+            const readableMatches = rawText.match(/[a-zA-Z0-9\s.,!?;:()\-'"]+/g);
+            if (readableMatches) {
+              extractedText = readableMatches
+                .filter(match => match.trim().length > 3) // Only keep meaningful text
+                .join(' ')
+                .trim();
+            }
+            
+            // Also try to find text between potential XML tags
+            const xmlMatches = rawText.match(/>([^<]*)</g);
+            if (xmlMatches) {
+              const xmlText = xmlMatches
+                .map(match => match.slice(1, -1).trim())
+                .filter(text => text.length > 0 && /[a-zA-Z]/.test(text))
+                .join(' ');
+              if (xmlText.length > extractedText.length) {
+                extractedText = xmlText;
+              }
+            }
+          } catch (textError) {
+            console.log(`Text extraction failed for ${filename}:`, textError.message);
+          }
+          
           // Create appropriate XML content based on filename
           let xmlContent = '';
           if (filename === 'word/document.xml') {
+            const documentText = extractedText || 'Document content could not be recovered due to compression corruption.';
             xmlContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <w:body>
     <w:p>
       <w:r>
-        <w:t>Document content recovered from corrupted file. The original content could not be restored due to compression corruption.</w:t>
+        <w:t>${documentText}</w:t>
       </w:r>
     </w:p>
   </w:body>
@@ -694,6 +726,9 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
           
           fileData = new TextEncoder().encode(xmlContent);
           console.log(`Created replacement XML content for ${filename}: ${fileData.length} bytes`);
+          if (extractedText) {
+            console.log(`Extracted text: ${extractedText.substring(0, 100)}...`);
+          }
           decompressed = true;
         }
         

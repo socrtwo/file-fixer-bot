@@ -671,35 +671,84 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
         if (!decompressed && filename.endsWith('.xml')) {
           console.log(`Attempting manual XML recovery for ${filename}`);
           
-          // Try to extract any readable text from the corrupted data
+          // Try alternative decompression methods first
           let extractedText = '';
+          
+          // Try gzip decompression (sometimes ZIP files have different compression)
           try {
-            // Look for readable ASCII/UTF-8 text in the compressed data
-            const textDecoder = new TextDecoder('utf-8', { fatal: false });
-            const rawText = textDecoder.decode(compressedData);
-            
-            // Extract any readable text sequences (letters, numbers, spaces, common punctuation)
-            const readableMatches = rawText.match(/[a-zA-Z0-9\s.,!?;:()\-'"]+/g);
-            if (readableMatches) {
-              extractedText = readableMatches
-                .filter(match => match.trim().length > 3) // Only keep meaningful text
-                .join(' ')
-                .trim();
-            }
-            
-            // Also try to find text between potential XML tags
-            const xmlMatches = rawText.match(/>([^<]*)</g);
-            if (xmlMatches) {
-              const xmlText = xmlMatches
-                .map(match => match.slice(1, -1).trim())
-                .filter(text => text.length > 0 && /[a-zA-Z]/.test(text))
-                .join(' ');
-              if (xmlText.length > extractedText.length) {
-                extractedText = xmlText;
+            const gzipStream = new ReadableStream({
+              start(controller) {
+                controller.enqueue(compressedData);
+                controller.close();
               }
+            });
+            const decompressedGzip = gzipStream.pipeThrough(new DecompressionStream('gzip'));
+            const responseGzip = new Response(decompressedGzip);
+            const decompressedBuffer = await responseGzip.arrayBuffer();
+            const xmlText = new TextDecoder('utf-8', { fatal: false }).decode(decompressedBuffer);
+            
+            // Check if this looks like valid XML
+            if (xmlText.includes('<?xml') || xmlText.includes('<w:')) {
+              fileData = new Uint8Array(decompressedBuffer);
+              console.log(`Successfully decompressed ${filename} with gzip: ${compressedData.length} -> ${fileData.length} bytes`);
+              decompressed = true;
             }
-          } catch (textError) {
-            console.log(`Text extraction failed for ${filename}:`, textError.message);
+          } catch (gzipError) {
+            console.log(`Gzip failed for ${filename}:`, gzipError.message);
+          }
+          
+          // If inflate didn't work, try to find readable text in a smarter way
+          if (!decompressed) {
+            try {
+              // Convert to string and look for actual readable sentences
+              const textDecoder = new TextDecoder('utf-8', { fatal: false });
+              const rawText = textDecoder.decode(compressedData);
+              
+              // Look for sequences of actual words (3+ letters, with spaces)
+              const wordPattern = /\b[a-zA-Z]{3,}(?:\s+[a-zA-Z]{2,})*\b/g;
+              const sentences = rawText.match(wordPattern);
+              
+              if (sentences && sentences.length > 0) {
+                // Join sentences that seem to be actual text
+                extractedText = sentences
+                  .filter(sentence => {
+                    // Filter out sequences that are mostly special characters
+                    const letterCount = (sentence.match(/[a-zA-Z]/g) || []).length;
+                    const totalLength = sentence.length;
+                    return letterCount / totalLength > 0.7; // At least 70% letters
+                  })
+                  .join('. ')
+                  .trim();
+                  
+                // Clean up the text
+                if (extractedText.length > 10) {
+                  extractedText = extractedText
+                    .replace(/\s+/g, ' ') // Multiple spaces to single space
+                    .replace(/[^\w\s.,!?;:()\-'"]/g, '') // Remove weird characters
+                    .trim();
+                }
+              }
+              
+              // If no good text found, look for any XML content patterns
+              if (!extractedText) {
+                const xmlPattern = /<w:t[^>]*>([^<]+)<\/w:t>/g;
+                let match;
+                const textParts = [];
+                
+                while ((match = xmlPattern.exec(rawText)) !== null) {
+                  const text = match[1].trim();
+                  if (text.length > 2 && /[a-zA-Z]/.test(text)) {
+                    textParts.push(text);
+                  }
+                }
+                
+                if (textParts.length > 0) {
+                  extractedText = textParts.join(' ');
+                }
+              }
+            } catch (textError) {
+              console.log(`Text extraction failed for ${filename}:`, textError.message);
+            }
           }
           
           // Create appropriate XML content based on filename

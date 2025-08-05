@@ -617,29 +617,71 @@ async function parseLocalFileHeader(data: Uint8Array, offset: number): Promise<{
       compressedData = data.slice(dataStart, endOffset);
     }
     
+    // Debug info about the file
+    console.log(`Processing ${filename}: compression=${compressionMethod}, compressed=${compressedData.length} bytes`);
+    console.log(`First 32 bytes of compressed data:`, Array.from(compressedData.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+    
     // Decompress data if needed
     let fileData: Uint8Array;
     if (compressionMethod === 8) { // DEFLATE compression
       try {
-        // Create a simple pako-like decompression using the native DecompressionStream
-        const stream = new ReadableStream({
-          start(controller) {
-            controller.enqueue(compressedData);
-            controller.close();
-          }
-        });
+        // ZIP uses raw deflate without zlib headers
+        // Try different decompression approaches
+        let decompressed = false;
         
-        const decompressedStream = stream.pipeThrough(new DecompressionStream('deflate'));
-        const response = new Response(decompressedStream);
-        const decompressedBuffer = await response.arrayBuffer();
-        fileData = new Uint8Array(decompressedBuffer);
-        console.log(`Decompressed ${filename}: ${compressedData.length} -> ${fileData.length} bytes`);
+        // First try: deflate-raw (raw deflate without zlib wrapper)
+        try {
+          const stream1 = new ReadableStream({
+            start(controller) {
+              controller.enqueue(compressedData);
+              controller.close();
+            }
+          });
+          const decompressedStream1 = stream1.pipeThrough(new DecompressionStream('deflate-raw'));
+          const response1 = new Response(decompressedStream1);
+          const decompressedBuffer1 = await response1.arrayBuffer();
+          fileData = new Uint8Array(decompressedBuffer1);
+          console.log(`Successfully decompressed ${filename} with deflate-raw: ${compressedData.length} -> ${fileData.length} bytes`);
+          decompressed = true;
+        } catch (rawError) {
+          console.log(`deflate-raw failed for ${filename}:`, rawError.message);
+        }
+        
+        // Second try: standard deflate (with zlib wrapper)
+        if (!decompressed) {
+          try {
+            const stream2 = new ReadableStream({
+              start(controller) {
+                controller.enqueue(compressedData);
+                controller.close();
+              }
+            });
+            const decompressedStream2 = stream2.pipeThrough(new DecompressionStream('deflate'));
+            const response2 = new Response(decompressedStream2);
+            const decompressedBuffer2 = await response2.arrayBuffer();
+            fileData = new Uint8Array(decompressedBuffer2);
+            console.log(`Successfully decompressed ${filename} with deflate: ${compressedData.length} -> ${fileData.length} bytes`);
+            decompressed = true;
+          } catch (deflateError) {
+            console.log(`deflate failed for ${filename}:`, deflateError.message);
+          }
+        }
+        
+        if (!decompressed) {
+          console.log(`All decompression methods failed for ${filename}, using compressed data`);
+          fileData = compressedData;
+        }
       } catch (error) {
         console.log(`Failed to decompress ${filename}, using compressed data:`, error.message);
         fileData = compressedData;
       }
+    } else if (compressionMethod === 0) {
+      // No compression
+      console.log(`${filename} is not compressed`);
+      fileData = compressedData;
     } else {
-      // No compression or unknown method
+      // Unknown compression method
+      console.log(`${filename} uses unknown compression method ${compressionMethod}`);
       fileData = compressedData;
     }
     

@@ -1,29 +1,43 @@
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Separator } from '@/components/ui/separator';
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Separator } from "@/components/ui/separator";
 import { 
   CheckCircle, 
   AlertTriangle, 
   XCircle, 
   Download, 
-  FileText, 
-  RotateCcw,
+  RefreshCw,
+  FileText,
+  AlertCircle,
+  FileCheck,
+  Eye,
   Info
-} from 'lucide-react';
+} from "lucide-react";
 
 interface RepairResult {
   success: boolean;
   fileName: string;
-  fileType: string;
-  originalSize: number;
-  repairedSize?: number;
+  status: 'success' | 'partial' | 'failed';
   issues?: string[];
   repairedFile?: Blob;
   repairedFileV2?: Blob;
   repairedFileUrl?: string;
-  status: 'success' | 'partial' | 'failed';
+  downloadUrl?: string;
+  preview?: {
+    content?: string;
+    extractedSheets?: string[];
+    extractedSlides?: number;
+    recoveredFiles?: string[];
+    fileSize?: number;
+  };
+  fileType?: 'DOCX' | 'XLSX' | 'PPTX';
+  recoveryStats?: {
+    totalFiles: number;
+    recoveredFiles: number;
+    corruptedFiles: number;
+  };
 }
 
 interface RepairResultsProps {
@@ -40,239 +54,213 @@ export const RepairResults = ({ result, onReset }: RepairResultsProps) => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const downloadRepairedFile = (version: 'v1' | 'v2' = 'v1') => {
-    // Handle direct URL download from backend
-    if (result.repairedFileUrl && version === 'v1') {
+  const downloadRepairedFile = () => {
+    if (result.downloadUrl || result.repairedFileUrl) {
+      window.open(result.downloadUrl || result.repairedFileUrl, '_blank');
+    } else if (result.repairedFileV2) {
+      const url = URL.createObjectURL(result.repairedFileV2);
       const a = document.createElement('a');
-      a.href = result.repairedFileUrl;
+      a.href = url;
       a.download = `repaired_${result.fileName}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      return;
-    }
-
-    // Handle blob download (backwards compatibility)
-    const fileToDownload = version === 'v1' ? result.repairedFile : result.repairedFileV2;
-    if (!fileToDownload) return;
-    
-    const url = URL.createObjectURL(fileToDownload);
-    const a = document.createElement('a');
-    a.href = url;
-    const versionSuffix = result.fileType === 'docx' && result.repairedFileV2 ? `_${version}` : '';
-    a.download = `repaired${versionSuffix}_${result.fileName}`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const getStatusIcon = () => {
-    switch (result.status) {
-      case 'success':
-        return <CheckCircle className="w-6 h-6 text-success" />;
-      case 'partial':
-        return <AlertTriangle className="w-6 h-6 text-warning" />;
-      case 'failed':
-        return <XCircle className="w-6 h-6 text-destructive" />;
+      URL.revokeObjectURL(url);
+    } else if (result.repairedFile) {
+      const url = URL.createObjectURL(result.repairedFile);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `repaired_${result.fileName}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     }
   };
 
-  const getStatusBadge = () => {
-    switch (result.status) {
+  const getStatusIcon = (status: string) => {
+    switch (status) {
       case 'success':
-        return <Badge className="bg-success text-success-foreground">Fully Repaired</Badge>;
+        return <CheckCircle className="h-12 w-12 text-green-500" />;
       case 'partial':
-        return <Badge className="bg-warning text-warning-foreground">Partially Repaired</Badge>;
+        return <AlertTriangle className="h-12 w-12 text-yellow-500" />;
       case 'failed':
-        return <Badge variant="destructive">Repair Failed</Badge>;
+        return <XCircle className="h-12 w-12 text-red-500" />;
+      default:
+        return <AlertCircle className="h-12 w-12 text-gray-500" />;
     }
   };
 
-  const getStatusMessage = () => {
-    switch (result.status) {
+  const getStatusBadge = (status: string) => {
+    switch (status) {
       case 'success':
-        return 'Your file has been successfully analyzed and appears to be in good condition.';
+        return <Badge className="bg-green-100 text-green-800">Success</Badge>;
       case 'partial':
-        return 'Your file has been partially repaired. Some issues were found and fixed, but the file may still have limitations.';
+        return <Badge className="bg-yellow-100 text-yellow-800">Partial</Badge>;
       case 'failed':
-        return 'Unfortunately, your file is too corrupted to be repaired. The damage is too extensive.';
+        return <Badge variant="destructive">Failed</Badge>;
+      default:
+        return <Badge variant="secondary">Unknown</Badge>;
+    }
+  };
+
+  const getStatusMessage = (status: string) => {
+    switch (status) {
+      case 'success':
+        return 'File repair completed successfully!';
+      case 'partial':
+        return 'File was partially repaired with some issues.';
+      case 'failed':
+        return 'File repair failed - too corrupted to recover.';
+      default:
+        return 'Repair status unknown.';
     }
   };
 
   return (
     <div className="w-full max-w-4xl mx-auto space-y-6">
-      {/* Status Card */}
-      <Card className="shadow-soft border-0 bg-gradient-card">
-        <CardHeader className="pb-4">
-          <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-3">
-              {getStatusIcon()}
-              Repair Results
-            </CardTitle>
-            {getStatusBadge()}
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <Alert className={`border-0 ${
-            result.status === 'success' ? 'bg-success-light text-success-foreground' :
-            result.status === 'partial' ? 'bg-warning-light text-warning-foreground' :
-            'bg-destructive/10 text-destructive-foreground'
-          }`}>
-            <Info className="h-4 w-4" />
-            <AlertDescription>
-              {getStatusMessage()}
-            </AlertDescription>
-          </Alert>
-
-          {/* File Information */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <h4 className="font-medium text-sm text-muted-foreground">File Details</h4>
-              <div className="space-y-1">
-                <p className="text-sm"><span className="font-medium">Name:</span> {result.fileName}</p>
-                <p className="text-sm"><span className="font-medium">Type:</span> {result.fileType.toUpperCase()}</p>
-                <p className="text-sm"><span className="font-medium">Original Size:</span> {formatFileSize(result.originalSize)}</p>
-                {result.repairedSize && (
-                  <p className="text-sm">
-                    <span className="font-medium">Repaired Size:</span> {formatFileSize(result.repairedSize)}
-                    {result.repairedSize !== result.originalSize && (
-                      <span className={`ml-2 text-xs ${
-                        result.repairedSize > result.originalSize ? 'text-warning' : 'text-success'
-                      }`}>
-                        ({result.repairedSize > result.originalSize ? '+' : ''}
-                        {formatFileSize(result.repairedSize - result.originalSize)})
-                      </span>
-                    )}
-                  </p>
-                )}
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="space-y-2">
-              <h4 className="font-medium text-sm text-muted-foreground">Actions</h4>
-              <div className="flex flex-col gap-2">
-                {result.success && result.repairedFile && (
-                  <>
-                    <Button 
-                      onClick={() => downloadRepairedFile('v1')}
-                      className="bg-gradient-primary hover:shadow-medium transition-all duration-300"
-                    >
-                      <Download className="w-4 h-4 mr-2" />
-                      {result.fileType === 'docx' && result.repairedFileV2 ? 'Download V1 (Document XML Repair)' : 'Download Repaired File'}
-                    </Button>
-                    {result.fileType === 'docx' && result.repairedFileV2 && (
-                      <Button 
-                        onClick={() => downloadRepairedFile('v2')}
-                        variant="outline"
-                        className="hover:shadow-soft transition-all duration-300"
-                      >
-                        <Download className="w-4 h-4 mr-2" />
-                        Download V2 (Full Repair)
-                      </Button>
-                    )}
-                  </>
-                )}
-                <Button 
-                  variant="outline" 
-                  onClick={onReset}
-                  className="hover:shadow-soft transition-all duration-300"
-                >
-                  <RotateCcw className="w-4 h-4 mr-2" />
-                  Try Another File
-                </Button>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Issues Card */}
-      {result.issues && result.issues.length > 0 && (
-        <Card className="shadow-soft border-0 bg-gradient-card">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <FileText className="w-5 h-5" />
-              Issues Detected & Repairs Made
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {result.issues.map((issue, index) => (
-                <div key={index} className="flex items-start gap-3 p-3 rounded-lg bg-muted/50">
-                  <AlertTriangle className="w-4 h-4 text-warning mt-0.5 flex-shrink-0" />
-                  <p className="text-sm">{issue}</p>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Recommendations Card */}
       <Card className="shadow-soft border-0 bg-gradient-card">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Info className="w-5 h-5" />
-            Recommendations
+          <CardTitle className="flex items-center justify-between">
+            <span>Repair Results</span>
+            {getStatusBadge(result.status)}
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3">
-          {result.status === 'success' && (
-            <div className="p-3 rounded-lg bg-success-light">
-              <p className="text-sm text-success-foreground">
-                • Your file appears to be in good condition. You can use it normally.
+        <CardContent className="space-y-6">
+          <div className="space-y-4">
+            <div className="text-center">
+              {getStatusIcon(result.status)}
+              <h3 className="text-xl font-semibold mt-4">{getStatusMessage(result.status)}</h3>
+              <p className="text-muted-foreground mt-2">
+                {result.fileName} - {formatFileSize(result.preview?.fileSize || result.repairedFile?.size || result.repairedFileV2?.size || 0)}
               </p>
+              {result.fileType && (
+                <Badge variant="outline" className="mt-2">
+                  {result.fileType} File
+                </Badge>
+              )}
+            </div>
+
+            <div className="flex gap-3 justify-center">
+              <Button onClick={downloadRepairedFile} className="flex items-center gap-2">
+                <Download className="h-4 w-4" />
+                Download Repaired File
+              </Button>
+              <Button variant="outline" onClick={onReset} className="flex items-center gap-2">
+                <RefreshCw className="h-4 w-4" />
+                Try Another File
+              </Button>
+            </div>
+          </div>
+
+          {/* Recovery Statistics */}
+          {result.recoveryStats && (
+            <div className="bg-muted/50 p-4 rounded-lg">
+              <h4 className="font-semibold mb-3 flex items-center gap-2">
+                <FileCheck className="h-4 w-4" />
+                Recovery Statistics
+              </h4>
+              <div className="grid grid-cols-3 gap-4 text-center">
+                <div>
+                  <div className="text-2xl font-bold text-primary">{result.recoveryStats.totalFiles}</div>
+                  <div className="text-sm text-muted-foreground">Total Files</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold text-green-600">{result.recoveryStats.recoveredFiles}</div>
+                  <div className="text-sm text-muted-foreground">Recovered</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold text-destructive">{result.recoveryStats.corruptedFiles}</div>
+                  <div className="text-sm text-muted-foreground">Corrupted</div>
+                </div>
+              </div>
             </div>
           )}
-          
-          {result.status === 'partial' && (
-            <div className="space-y-2">
-              <div className="p-3 rounded-lg bg-warning-light">
-                <p className="text-sm text-warning-foreground">
-                  • Test the repaired file thoroughly before using it for important work.
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-warning-light">
-                <p className="text-sm text-warning-foreground">
-                  • Some formatting or content may be lost due to corruption.
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-warning-light">
-                <p className="text-sm text-warning-foreground">
-                  • Consider recovering from a recent backup if available.
-                </p>
+
+          {/* Content Preview */}
+          {result.preview && (
+            <div className="bg-muted/50 p-4 rounded-lg">
+              <h4 className="font-semibold mb-3 flex items-center gap-2">
+                <Eye className="h-4 w-4" />
+                Content Preview
+              </h4>
+              
+              {result.fileType === 'DOCX' && result.preview.content && (
+                <div className="bg-background p-3 rounded border text-sm font-mono">
+                  {result.preview.content}
+                </div>
+              )}
+              
+              {result.fileType === 'XLSX' && result.preview.extractedSheets && (
+                <div className="space-y-2">
+                  <p className="text-sm text-muted-foreground">
+                    Recovered {result.preview.extractedSheets.length} worksheets
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {result.preview.extractedSheets.map((sheet, index) => (
+                      <Badge key={index} variant="secondary">
+                        {sheet}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
+              {result.fileType === 'PPTX' && result.preview.extractedSlides !== undefined && (
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-primary">{result.preview.extractedSlides}</div>
+                  <div className="text-sm text-muted-foreground">Slides Recovered</div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Issues */}
+          {result.issues && result.issues.length > 0 && (
+            <div className="bg-muted/50 p-4 rounded-lg">
+              <h4 className="font-semibold mb-3 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" />
+                Issues Detected & Repairs Made
+              </h4>
+              <div className="space-y-2">
+                {result.issues.map((issue, index) => (
+                  <div key={index} className="flex items-start gap-2 text-sm">
+                    <AlertCircle className="h-4 w-4 text-yellow-500 mt-0.5 flex-shrink-0" />
+                    <span>{issue}</span>
+                  </div>
+                ))}
               </div>
             </div>
           )}
-          
-          {result.status === 'failed' && (
-            <div className="space-y-2">
-              <div className="p-3 rounded-lg bg-destructive/10">
-                <p className="text-sm text-destructive-foreground">
-                  • Try using Microsoft Office's built-in repair feature.
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-destructive/10">
-                <p className="text-sm text-destructive-foreground">
-                  • Restore from a recent backup if available.
-                </p>
-              </div>
-              <div className="p-3 rounded-lg bg-destructive/10">
-                <p className="text-sm text-destructive-foreground">
-                  • Contact IT support if this is a critical business document.
-                </p>
-              </div>
+
+          {/* Recommendations */}
+          <div className="bg-muted/50 p-4 rounded-lg">
+            <h4 className="font-semibold mb-3 flex items-center gap-2">
+              <Info className="h-4 w-4" />
+              Recommendations
+            </h4>
+            <div className="space-y-2 text-sm text-muted-foreground">
+              {result.status === 'success' && (
+                <p>• Your file has been successfully repaired and should work normally.</p>
+              )}
+              {result.status === 'partial' && (
+                <>
+                  <p>• Test the repaired file thoroughly before using it for important work.</p>
+                  <p>• Some formatting or content may be lost due to the original corruption.</p>
+                  <p>• Consider recovering from a recent backup if available.</p>
+                </>
+              )}
+              {result.status === 'failed' && (
+                <>
+                  <p>• Try using Microsoft Office's built-in repair feature.</p>
+                  <p>• Restore from a recent backup if available.</p>
+                  <p>• The file may be too severely corrupted for automated repair.</p>
+                </>
+              )}
+              <Separator className="my-2" />
+              <p>• Always keep regular backups of important documents.</p>
+              <p>• Consider using cloud storage with version history for critical files.</p>
             </div>
-          )}
-          
-          <Separator />
-          
-          <div className="text-xs text-muted-foreground space-y-1">
-            <p>• Always keep regular backups of important documents.</p>
-            <p>• Scan your system for malware if file corruption happens frequently.</p>
-            <p>• Consider using cloud storage with version history for critical files.</p>
           </div>
         </CardContent>
       </Card>

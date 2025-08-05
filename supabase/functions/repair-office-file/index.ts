@@ -1,6 +1,10 @@
+import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import yauzl from 'https://esm.sh/yauzl@2.10.0';
+import JSZip from "https://esm.sh/jszip@3.10.1";
+import yauzl from "https://esm.sh/yauzl@2.10.0";
+import * as XLSX from "https://esm.sh/xlsx@0.18.5";
+import mammoth from "https://esm.sh/mammoth@1.10.0";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -10,12 +14,22 @@ const corsHeaders = {
 interface RepairResult {
   success: boolean;
   fileName: string;
-  fileType: string;
-  originalSize: number;
-  repairedSize?: number;
-  issues?: string[];
-  repairedFileUrl?: string;
   status: 'success' | 'partial' | 'failed';
+  issues?: string[];
+  downloadUrl?: string;
+  preview?: {
+    content?: string;
+    extractedSheets?: string[];
+    extractedSlides?: number;
+    recoveredFiles?: string[];
+    fileSize?: number;
+  };
+  fileType?: 'DOCX' | 'XLSX' | 'PPTX';
+  recoveryStats?: {
+    totalFiles: number;
+    recoveredFiles: number;
+    corruptedFiles: number;
+  };
 }
 
 serve(async (req) => {
@@ -25,7 +39,7 @@ serve(async (req) => {
   }
 
   try {
-    console.log('Starting advanced file repair process');
+    console.log('Starting enhanced Office file repair process');
     
     const formData = await req.formData();
     const file = formData.get('file') as File;
@@ -37,12 +51,10 @@ serve(async (req) => {
       });
     }
 
-    console.log(`Processing file: ${file.name}, size: ${file.size} bytes`);
-
     // Validate file type
     const allowedTypes = [
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
       'application/vnd.openxmlformats-officedocument.presentationml.presentation'
     ];
 
@@ -55,33 +67,53 @@ serve(async (req) => {
       });
     }
 
-    const arrayBuffer = await file.arrayBuffer();
+    const fileData = await file.arrayBuffer();
+
+    // Process the file with format-specific repair
+    console.log(`Processing file: ${file.name}, size: ${fileData.byteLength}`);
+    
+    const fileType = getFileType(file.type);
+    let repairedFile: Uint8Array;
+    let preview: any = {};
+    let recoveryStats = { totalFiles: 0, recoveredFiles: 0, corruptedFiles: 0 };
     const issues: string[] = [];
 
-    console.log('Attempting advanced ZIP repair...');
-    
-    // Advanced ZIP repair that mimics zip -FF functionality
-    const repairedData = await advancedZipRepair(arrayBuffer, issues);
-    
-    if (!repairedData) {
-      return new Response(JSON.stringify({
-        success: false,
-        fileName: file.name,
-        fileType: getFileType(file.type),
-        originalSize: file.size,
-        status: 'failed',
-        issues: ['File is too severely corrupted to repair']
-      }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+    try {
+      // Use format-specific repair based on file type
+      const repairResult = await repairOfficeFile(fileData, fileType, file.name);
+      repairedFile = repairResult.data;
+      preview = repairResult.preview;
+      recoveryStats = repairResult.stats;
+      issues.push(...repairResult.issues);
+      
+      console.log(`${fileType} repair successful with ${recoveryStats.recoveredFiles}/${recoveryStats.totalFiles} files recovered`);
+    } catch (error) {
+      console.log('Format-specific repair failed, trying generic repair:', error.message);
+      issues.push(`${fileType}-specific repair failed: ${error.message}`);
+      
+      try {
+        // Fallback to generic repair
+        repairedFile = await advancedZipRepair(fileData);
+        issues.push('Repaired using generic ZIP recovery');
+      } catch (fallbackError) {
+        console.log('All repair methods failed:', fallbackError.message);
+        
+        return new Response(
+          JSON.stringify({
+            success: false,
+            fileName: file.name,
+            status: 'failed',
+            fileType,
+            issues: ['Unable to repair file: corrupted beyond recovery']
+          } as RepairResult),
+          { 
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          }
+        );
+      }
     }
 
-    console.log('Performing XML repairs...');
-    
-    // Repair XML content within the ZIP
-    const finalRepairedData = await repairXmlInZip(repairedData, issues);
-    
     // Upload to Supabase storage
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
@@ -91,7 +123,7 @@ serve(async (req) => {
     const fileName = `repaired_${Date.now()}_${file.name}`;
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from('file-repairs')
-      .upload(fileName, finalRepairedData, {
+      .upload(fileName, repairedFile, {
         contentType: file.type,
         upsert: false
       });
@@ -105,377 +137,403 @@ serve(async (req) => {
       .from('file-repairs')
       .createSignedUrl(fileName, 3600); // 1 hour expiry
 
-    const result: RepairResult = {
-      success: true,
-      fileName: file.name,
-      fileType: getFileType(file.type),
-      originalSize: file.size,
-      repairedSize: finalRepairedData.byteLength,
-      issues: issues.length > 0 ? issues : undefined,
-      repairedFileUrl: signedUrlData?.signedUrl,
-      status: issues.length > 0 ? 'partial' : 'success'
-    };
+    const signedUrl = signedUrlData?.signedUrl;
 
-    console.log('File repair completed successfully');
-
-    return new Response(JSON.stringify(result), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+    return new Response(
+      JSON.stringify({
+        success: true,
+        fileName: file.name,
+        status: issues.length > 0 ? 'partial' : 'success',
+        issues: issues.length > 0 ? issues : undefined,
+        downloadUrl: signedUrl,
+        fileType,
+        preview,
+        recoveryStats
+      } as RepairResult),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
 
   } catch (error) {
     console.error('Error in repair-office-file function:', error);
     
-    const result: RepairResult = {
-      success: false,
-      fileName: 'unknown',
-      fileType: 'unknown',
-      originalSize: 0,
-      status: 'failed',
-      issues: [error.message]
-    };
-
-    return new Response(JSON.stringify(result), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+    return new Response(
+      JSON.stringify({
+        success: false,
+        fileName: 'unknown',
+        status: 'failed',
+        issues: [error.message]
+      } as RepairResult),
+      { 
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      }
+    );
   }
 });
 
-async function advancedZipRepair(arrayBuffer: ArrayBuffer, issues: string[]): Promise<ArrayBuffer | null> {
-  console.log('Using yauzl for ZIP repair...');
+function getFileType(mimeType: string): 'DOCX' | 'XLSX' | 'PPTX' {
+  if (mimeType.includes('wordprocessingml')) return 'DOCX';
+  if (mimeType.includes('spreadsheetml')) return 'XLSX';
+  if (mimeType.includes('presentationml')) return 'PPTX';
+  return 'DOCX'; // Default fallback
+}
+
+// Format-specific repair function
+async function repairOfficeFile(
+  fileData: ArrayBuffer, 
+  fileType: 'DOCX' | 'XLSX' | 'PPTX', 
+  fileName: string
+): Promise<{
+  data: Uint8Array;
+  preview: any;
+  stats: { totalFiles: number; recoveredFiles: number; corruptedFiles: number };
+  issues: string[];
+}> {
+  const issues: string[] = [];
+
+  switch (fileType) {
+    case 'DOCX':
+      return await repairDocx(fileData, issues);
+    case 'XLSX':
+      return await repairXlsx(fileData, issues);
+    case 'PPTX':
+      return await repairPptx(fileData, issues);
+    default:
+      throw new Error(`Unsupported file type: ${fileType}`);
+  }
+}
+
+// DOCX-specific repair
+async function repairDocx(
+  fileData: ArrayBuffer, 
+  issues: string[]
+): Promise<{
+  data: Uint8Array;
+  preview: any;
+  stats: { totalFiles: number; recoveredFiles: number; corruptedFiles: number };
+  issues: string[];
+}> {
+  const stats = { totalFiles: 0, recoveredFiles: 0, corruptedFiles: 0 };
   
   try {
-    // Write the corrupted file to a temporary buffer
-    const tempBuffer = Buffer.from(arrayBuffer);
+    // Load with error tolerance
+    const zip = await JSZip.loadAsync(fileData, { checkCRC32: false });
+    const newZip = new JSZip();
     
-    // Try to extract files using yauzl with error tolerance
-    return await new Promise((resolve, reject) => {
-      yauzl.fromBuffer(tempBuffer, { lazyEntries: true, validateEntrySizes: false }, (err, zipfile) => {
-        if (err) {
-          console.log(`yauzl failed to open ZIP: ${err.message}`);
-          reject(err);
+    // Essential DOCX files
+    const essentialFiles = [
+      'word/document.xml',
+      'word/styles.xml',
+      '_rels/.rels',
+      '[Content_Types].xml'
+    ];
+    
+    let documentContent = '';
+    
+    for (const [path, file] of Object.entries(zip.files)) {
+      if (!file.dir) {
+        stats.totalFiles++;
+        try {
+          const content = await file.async('arraybuffer');
+          newZip.file(path, content);
+          stats.recoveredFiles++;
+          
+          // Extract document content for preview
+          if (path === 'word/document.xml') {
+            const xmlContent = await file.async('string');
+            documentContent = extractTextFromDocumentXml(xmlContent);
+          }
+        } catch (e) {
+          stats.corruptedFiles++;
+          issues.push(`Skipped corrupted file: ${path}`);
+        }
+      }
+    }
+    
+    // Ensure essential files exist
+    for (const essential of essentialFiles) {
+      if (!newZip.file(essential)) {
+        const minimalContent = generateMinimalDocxContent(essential);
+        newZip.file(essential, minimalContent);
+        issues.push(`Regenerated missing file: ${essential}`);
+      }
+    }
+    
+    const repairedData = await newZip.generateAsync({ type: 'uint8array' });
+    
+    const preview = {
+      content: documentContent.slice(0, 500) + (documentContent.length > 500 ? '...' : ''),
+      recoveredFiles: Object.keys(newZip.files).filter(f => !newZip.files[f].dir),
+      fileSize: repairedData.length
+    };
+    
+    return { data: repairedData, preview, stats, issues };
+  } catch (error) {
+    throw new Error(`DOCX repair failed: ${error.message}`);
+  }
+}
+
+// XLSX-specific repair
+async function repairXlsx(
+  fileData: ArrayBuffer, 
+  issues: string[]
+): Promise<{
+  data: Uint8Array;
+  preview: any;
+  stats: { totalFiles: number; recoveredFiles: number; corruptedFiles: number };
+  issues: string[];
+}> {
+  const stats = { totalFiles: 0, recoveredFiles: 0, corruptedFiles: 0 };
+  
+  try {
+    // Use SheetJS with error tolerance
+    const workbook = XLSX.read(fileData, { 
+      cellStyles: true, 
+      sheetStubs: true,
+      bookDeps: true,
+      bookFiles: true,
+      bookProps: true,
+      bookSheets: true,
+      bookVBA: true
+    });
+    
+    const extractedSheets: string[] = [];
+    let totalCells = 0;
+    
+    // Process each worksheet
+    workbook.SheetNames.forEach(sheetName => {
+      const worksheet = workbook.Sheets[sheetName];
+      if (worksheet) {
+        extractedSheets.push(sheetName);
+        const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1:A1');
+        totalCells += (range.e.r - range.s.r + 1) * (range.e.c - range.s.c + 1);
+        stats.recoveredFiles++;
+      } else {
+        stats.corruptedFiles++;
+        issues.push(`Worksheet "${sheetName}" is corrupted`);
+      }
+      stats.totalFiles++;
+    });
+    
+    // Rebuild the workbook
+    const repairedBuffer = XLSX.write(workbook, { 
+      type: 'array',
+      bookType: 'xlsx',
+      compression: true 
+    });
+    
+    const preview = {
+      extractedSheets,
+      totalCells,
+      recoveredFiles: extractedSheets,
+      fileSize: repairedBuffer.length
+    };
+    
+    return { 
+      data: new Uint8Array(repairedBuffer), 
+      preview, 
+      stats, 
+      issues 
+    };
+  } catch (error) {
+    throw new Error(`XLSX repair failed: ${error.message}`);
+  }
+}
+
+// PPTX-specific repair
+async function repairPptx(
+  fileData: ArrayBuffer, 
+  issues: string[]
+): Promise<{
+  data: Uint8Array;
+  preview: any;
+  stats: { totalFiles: number; recoveredFiles: number; corruptedFiles: number };
+  issues: string[];
+}> {
+  const stats = { totalFiles: 0, recoveredFiles: 0, corruptedFiles: 0 };
+  
+  try {
+    const zip = await JSZip.loadAsync(fileData, { checkCRC32: false });
+    const newZip = new JSZip();
+    
+    let slideCount = 0;
+    const slideFiles: string[] = [];
+    
+    for (const [path, file] of Object.entries(zip.files)) {
+      if (!file.dir) {
+        stats.totalFiles++;
+        try {
+          const content = await file.async('arraybuffer');
+          newZip.file(path, content);
+          stats.recoveredFiles++;
+          
+          // Count slides
+          if (path.match(/ppt\/slides\/slide\d+\.xml/)) {
+            slideCount++;
+            slideFiles.push(path);
+          }
+        } catch (e) {
+          stats.corruptedFiles++;
+          issues.push(`Skipped corrupted file: ${path}`);
+        }
+      }
+    }
+    
+    // Ensure essential PPTX structure
+    const essentialFiles = [
+      'ppt/presentation.xml',
+      '_rels/.rels',
+      '[Content_Types].xml'
+    ];
+    
+    for (const essential of essentialFiles) {
+      if (!newZip.file(essential)) {
+        const minimalContent = generateMinimalPptxContent(essential);
+        newZip.file(essential, minimalContent);
+        issues.push(`Regenerated missing file: ${essential}`);
+      }
+    }
+    
+    const repairedData = await newZip.generateAsync({ type: 'uint8array' });
+    
+    const preview = {
+      extractedSlides: slideCount,
+      slideFiles,
+      recoveredFiles: Object.keys(newZip.files).filter(f => !newZip.files[f].dir),
+      fileSize: repairedData.length
+    };
+    
+    return { data: repairedData, preview, stats, issues };
+  } catch (error) {
+    throw new Error(`PPTX repair failed: ${error.message}`);
+  }
+}
+
+// Helper functions
+function extractTextFromDocumentXml(xmlContent: string): string {
+  // Simple text extraction from Word document XML
+  const textMatches = xmlContent.match(/<w:t[^>]*>(.*?)<\/w:t>/g);
+  if (!textMatches) return '';
+  
+  return textMatches
+    .map(match => match.replace(/<[^>]*>/g, ''))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function generateMinimalDocxContent(filePath: string): string {
+  switch (filePath) {
+    case 'word/document.xml':
+      return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Document recovered</w:t></w:r></w:p>
+  </w:body>
+</w:document>`;
+    case '[Content_Types].xml':
+      return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`;
+    default:
+      return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><root/>';
+  }
+}
+
+function generateMinimalPptxContent(filePath: string): string {
+  switch (filePath) {
+    case 'ppt/presentation.xml':
+      return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst/>
+  <p:sldIdLst/>
+  <p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>`;
+    case '[Content_Types].xml':
+      return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+</Types>`;
+    default:
+      return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><root/>';
+  }
+}
+
+async function advancedZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> {
+  console.log('Using yauzl for ZIP repair...');
+  
+  const tempBuffer = Buffer.from(arrayBuffer);
+  
+  return await new Promise((resolve, reject) => {
+    yauzl.fromBuffer(tempBuffer, { lazyEntries: true, validateEntrySizes: false }, (err, zipfile) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      
+      const extractedFiles: { [key: string]: Buffer } = {};
+      
+      zipfile.on("entry", (entry) => {
+        if (/\/$/.test(entry.fileName)) {
+          zipfile.readEntry();
           return;
         }
         
-        console.log('Successfully opened ZIP with yauzl');
-        const extractedFiles: { [key: string]: Buffer } = {};
-        let entryCount = 0;
-        
-        zipfile.on("entry", (entry) => {
-          entryCount++;
-          
-          if (/\/$/.test(entry.fileName)) {
-            // Directory entry
+        zipfile.openReadStream(entry, (err, readStream) => {
+          if (err) {
             zipfile.readEntry();
             return;
           }
           
-          // File entry
-          zipfile.openReadStream(entry, (err, readStream) => {
-            if (err) {
-              console.log(`Failed to extract ${entry.fileName}: ${err.message}`);
-              issues.push(`Could not extract ${entry.fileName}: ${err.message}`);
-              zipfile.readEntry();
-              return;
-            }
-            
-            const chunks: Buffer[] = [];
-            readStream.on('data', (chunk) => {
-              chunks.push(chunk);
-            });
-            
-            readStream.on('end', () => {
-              extractedFiles[entry.fileName] = Buffer.concat(chunks);
-              console.log(`Extracted: ${entry.fileName} (${extractedFiles[entry.fileName].length} bytes)`);
-              zipfile.readEntry();
-            });
-            
-            readStream.on('error', (err) => {
-              console.log(`Error reading ${entry.fileName}: ${err.message}`);
-              issues.push(`Error reading ${entry.fileName}: ${err.message}`);
-              zipfile.readEntry();
-            });
+          const chunks: Buffer[] = [];
+          readStream.on('data', (chunk) => {
+            chunks.push(chunk);
+          });
+          
+          readStream.on('end', () => {
+            extractedFiles[entry.fileName] = Buffer.concat(chunks);
+            zipfile.readEntry();
+          });
+          
+          readStream.on('error', (err) => {
+            zipfile.readEntry();
           });
         });
-        
-        zipfile.on("end", async () => {
-          console.log(`yauzl extraction complete. Found ${entryCount} entries, extracted ${Object.keys(extractedFiles).length} files`);
-          issues.push(`Extracted ${Object.keys(extractedFiles).length} files from corrupted ZIP`);
-          
-          if (Object.keys(extractedFiles).length > 0) {
-            try {
-              const repairedZip = await rebuildZipFromExtractedFiles(extractedFiles, issues);
-              resolve(repairedZip);
-            } catch (error) {
-              reject(error);
-            }
-          } else {
-            issues.push('No files could be extracted from ZIP');
-            resolve(null);
-          }
-        });
-        
-        zipfile.on("error", (err) => {
-          console.log(`yauzl error: ${err.message}`);
-          reject(err);
-        });
-        
-        zipfile.readEntry();
       });
-    });
-    
-  } catch (error) {
-    console.log(`yauzl failed: ${error.message}`);
-    issues.push(`ZIP extraction failed: ${error.message}`);
-    
-    // Fallback to manual header scanning
-    return await fallbackZipRepair(arrayBuffer, issues);
-  }
-}
-
-function findCentralDirectory(data: Uint8Array): number {
-  const END_CENTRAL_DIR = [0x50, 0x4B, 0x05, 0x06];
-  
-  // Search backwards from end for end of central directory
-  for (let i = data.length - 22; i >= 0; i--) {
-    if (data[i] === END_CENTRAL_DIR[0] && 
-        data[i + 1] === END_CENTRAL_DIR[1] && 
-        data[i + 2] === END_CENTRAL_DIR[2] && 
-        data[i + 3] === END_CENTRAL_DIR[3]) {
       
-      // Extract central directory offset
-      const centralDirOffset = data[i + 16] | 
-                             (data[i + 17] << 8) | 
-                             (data[i + 18] << 16) | 
-                             (data[i + 19] << 24);
-      return centralDirOffset;
-    }
-  }
-  return -1;
+      zipfile.on("end", async () => {
+        if (Object.keys(extractedFiles).length > 0) {
+          try {
+            const repairedZip = await rebuildZipFromExtractedFiles(extractedFiles);
+            resolve(new Uint8Array(repairedZip));
+          } catch (error) {
+            reject(error);
+          }
+        } else {
+          reject(new Error('No files could be extracted'));
+        }
+      });
+      
+      zipfile.readEntry();
+    });
+  });
 }
 
-async function rebuildZipFromExtractedFiles(extractedFiles: { [key: string]: Buffer }, issues: string[]): Promise<ArrayBuffer> {
-  // Import JSZip to rebuild the ZIP
-  const JSZip = (await import('https://esm.sh/jszip@3.10.1')).default;
-  
+async function rebuildZipFromExtractedFiles(extractedFiles: { [key: string]: Buffer }): Promise<ArrayBuffer> {
   const zip = new JSZip();
   
-  // Add each extracted file to the new ZIP, repairing XML content as we go
   for (const [fileName, fileData] of Object.entries(extractedFiles)) {
-    try {
-      if (fileName.endsWith('.xml') || fileName.endsWith('.rels')) {
-        // Repair XML content
-        const content = fileData.toString('utf-8');
-        const repairedContent = repairXmlContent(content);
-        
-        if (content !== repairedContent) {
-          issues.push(`Repaired XML in ${fileName}`);
-        }
-        
-        zip.file(fileName, repairedContent);
-      } else {
-        // Add binary file as-is
-        zip.file(fileName, fileData);
-      }
-    } catch (error) {
-      console.log(`Error processing ${fileName}: ${error.message}`);
-      issues.push(`Could not process ${fileName}: ${error.message}`);
-    }
+    zip.file(fileName, fileData);
   }
   
-  // Generate the repaired ZIP
   return await zip.generateAsync({
     type: 'arraybuffer',
     compression: 'DEFLATE',
     compressionOptions: { level: 6 }
   });
-}
-
-async function fallbackZipRepair(arrayBuffer: ArrayBuffer, issues: string[]): Promise<ArrayBuffer | null> {
-  const data = new Uint8Array(arrayBuffer);
-  
-  // ZIP file signatures
-  const LOCAL_FILE_HEADER = [0x50, 0x4B, 0x03, 0x04];
-  
-  console.log('Falling back to manual ZIP header scanning...');
-  
-  // Find all local file headers
-  const localHeaders: number[] = [];
-  for (let i = 0; i <= data.length - 4; i++) {
-    if (data[i] === LOCAL_FILE_HEADER[0] && 
-        data[i + 1] === LOCAL_FILE_HEADER[1] && 
-        data[i + 2] === LOCAL_FILE_HEADER[2] && 
-        data[i + 3] === LOCAL_FILE_HEADER[3]) {
-      localHeaders.push(i);
-    }
-  }
-  
-  if (localHeaders.length === 0) {
-    issues.push('No valid ZIP headers found in fallback scan');
-    return null;
-  }
-  
-  console.log(`Fallback found ${localHeaders.length} local file headers`);
-  issues.push(`Fallback recovery found ${localHeaders.length} files`);
-  
-  // Start rebuilding from the first valid header
-  const startOffset = localHeaders[0];
-  let repairedData = data.slice(startOffset);
-  
-  // Try to reconstruct central directory if missing/corrupted
-  try {
-    const centralDirStart = findCentralDirectory(repairedData);
-    if (centralDirStart === -1) {
-      console.log('Central directory corrupted, attempting reconstruction...');
-      repairedData = await reconstructZipStructure(repairedData, issues);
-    }
-  } catch (error) {
-    console.log('Error finding central directory, reconstructing...');
-    repairedData = await reconstructZipStructure(repairedData, issues);
-  }
-  
-  return repairedData.buffer.slice(repairedData.byteOffset, repairedData.byteOffset + repairedData.byteLength);
-}
-
-async function reconstructZipStructure(data: Uint8Array, issues: string[]): Promise<Uint8Array> {
-  issues.push('Reconstructing ZIP central directory');
-  
-  // This is a simplified reconstruction - in practice, we'd need to parse each local file header
-  // and rebuild the central directory entries
-  
-  // For now, just ensure we have the minimum required structure
-  const result = new Uint8Array(data.length + 1024); // Add some buffer space
-  result.set(data);
-  
-  // Try to find the end and add a minimal end of central directory record if missing
-  const endPattern = [0x50, 0x4B, 0x05, 0x06];
-  let hasEndRecord = false;
-  
-  for (let i = data.length - 22; i >= Math.max(0, data.length - 1000); i--) {
-    if (data[i] === endPattern[0] && data[i + 1] === endPattern[1] && 
-        data[i + 2] === endPattern[2] && data[i + 3] === endPattern[3]) {
-      hasEndRecord = true;
-      break;
-    }
-  }
-  
-  if (!hasEndRecord) {
-    // Add minimal end of central directory record
-    const endRecord = new Uint8Array([
-      0x50, 0x4B, 0x05, 0x06, // End of central dir signature
-      0x00, 0x00, // Number of this disk
-      0x00, 0x00, // Disk where central directory starts
-      0x00, 0x00, // Number of central directory records on this disk
-      0x00, 0x00, // Total number of central directory records
-      0x00, 0x00, 0x00, 0x00, // Size of central directory
-      0x00, 0x00, 0x00, 0x00, // Offset of start of central directory
-      0x00, 0x00  // Comment length
-    ]);
-    
-    result.set(endRecord, data.length);
-    return result.slice(0, data.length + endRecord.length);
-  }
-  
-  return result.slice(0, data.length);
-}
-
-async function repairXmlInZip(arrayBuffer: ArrayBuffer, issues: string[]): Promise<ArrayBuffer> {
-  // Import JSZip dynamically for ZIP manipulation
-  const JSZip = (await import('https://esm.sh/jszip@3.10.1')).default;
-  
-  try {
-    const zip = await JSZip.loadAsync(arrayBuffer);
-    let hasRepairs = false;
-    
-    // Iterate through all files and repair XML content
-    for (const [path, zipObject] of Object.entries(zip.files)) {
-      if (zipObject.dir) continue;
-      
-      if (path.endsWith('.xml') || path.endsWith('.rels')) {
-        try {
-          const content = await zipObject.async('text');
-          const repairedContent = repairXmlContent(content);
-          
-          if (content !== repairedContent) {
-            zip.file(path, repairedContent);
-            issues.push(`Repaired XML in ${path}`);
-            hasRepairs = true;
-          }
-        } catch (error) {
-          issues.push(`Could not repair ${path}: ${error.message}`);
-        }
-      }
-    }
-    
-    if (hasRepairs) {
-      const repairedBuffer = await zip.generateAsync({
-        type: 'arraybuffer',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 }
-      });
-      return repairedBuffer;
-    }
-    
-    return arrayBuffer;
-    
-  } catch (error) {
-    console.log('JSZip failed, returning original data:', error.message);
-    issues.push('Advanced XML repair not possible, but ZIP structure was repaired');
-    return arrayBuffer;
-  }
-}
-
-function repairXmlContent(content: string): string {
-  let repaired = content;
-  
-  // Remove null bytes and other control characters
-  repaired = repaired.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
-  
-  // Fix common XML issues
-  
-  // 1. Fix malformed attributes (unquoted values)
-  repaired = repaired.replace(/(\w+)=([^"\s>]+)(?=\s|>)/g, '$1="$2"');
-  
-  // 2. Fix entity references
-  repaired = repaired.replace(/&(?![a-zA-Z0-9#]+;)/g, '&amp;');
-  
-  // 3. Remove truncated/incomplete tags at the end
-  const lastGt = repaired.lastIndexOf('>');
-  const lastLt = repaired.lastIndexOf('<');
-  
-  if (lastLt > lastGt) {
-    // Truncate incomplete tag at the end
-    repaired = repaired.substring(0, lastLt);
-  }
-  
-  // 4. Ensure XML declaration exists and is well-formed
-  if (!repaired.trimStart().startsWith('<?xml')) {
-    repaired = '<?xml version="1.0" encoding="UTF-8"?>\n' + repaired;
-  }
-  
-  // 5. Try to close unclosed tags by finding common patterns
-  const docMatch = repaired.match(/<(\w+:)?document[^>]*>/);
-  if (docMatch && !repaired.includes('</document>') && !repaired.includes('</' + (docMatch[1] || '') + 'document>')) {
-    repaired += '</' + (docMatch[1] || '') + 'document>';
-  }
-  
-  const bodyMatch = repaired.match(/<(\w+:)?body[^>]*>/);
-  if (bodyMatch && !repaired.includes('</body>') && !repaired.includes('</' + (bodyMatch[1] || '') + 'body>')) {
-    repaired += '</' + (bodyMatch[1] || '') + 'body>';
-  }
-  
-  return repaired;
-}
-
-function getFileType(mimeType: string): string {
-  switch (mimeType) {
-    case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-      return 'DOCX';
-    case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-      return 'XLSX';
-    case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
-      return 'PPTX';
-    default:
-      return 'Unknown';
-  }
 }

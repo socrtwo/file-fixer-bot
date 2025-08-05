@@ -3,17 +3,30 @@ import { FileUpload } from '@/components/FileUpload';
 import { RepairResults } from '@/components/RepairResults';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Shield, Zap, FileText } from 'lucide-react';
+import { Shield, Zap, FileText, Layers, BarChart3, Presentation } from 'lucide-react';
 
 interface RepairResult {
   success: boolean;
   fileName: string;
-  fileType: string;
-  originalSize: number;
-  repairedSize?: number;
+  status: 'success' | 'partial' | 'failed';
   issues?: string[];
   repairedFile?: Blob;
-  status: 'success' | 'partial' | 'failed';
+  repairedFileV2?: Blob;
+  repairedFileUrl?: string;
+  downloadUrl?: string;
+  preview?: {
+    content?: string;
+    extractedSheets?: string[];
+    extractedSlides?: number;
+    recoveredFiles?: string[];
+    fileSize?: number;
+  };
+  fileType?: 'DOCX' | 'XLSX' | 'PPTX';
+  recoveryStats?: {
+    totalFiles: number;
+    recoveredFiles: number;
+    corruptedFiles: number;
+  };
 }
 
 const Index = () => {
@@ -42,7 +55,7 @@ const Index = () => {
               </h1>
             </div>
             <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-              Repair corrupted Microsoft Word, Excel, and PowerPoint files with our advanced recovery technology
+              Advanced Office file repair with format-specific recovery, content preview, and detailed repair statistics
             </p>
             
             <div className="flex flex-wrap justify-center gap-3 mt-6">
@@ -52,11 +65,11 @@ const Index = () => {
               </div>
               <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-card border shadow-soft">
                 <Zap className="w-4 h-4 text-accent" />
-                <span className="text-sm font-medium">Fast Recovery</span>
+                <span className="text-sm font-medium">Smart Recovery</span>
               </div>
               <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-card border shadow-soft">
-                <FileText className="w-4 h-4 text-warning" />
-                <span className="text-sm font-medium">All Office Formats</span>
+                <Layers className="w-4 h-4 text-warning" />
+                <span className="text-sm font-medium">Content Preview</span>
               </div>
             </div>
           </div>
@@ -70,7 +83,7 @@ const Index = () => {
             {/* Upload Section */}
             <FileUpload onFileProcessed={handleFileProcessed} />
             
-            {/* Features Section */}
+            {/* Enhanced Features Section */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl mx-auto">
               <Card className="shadow-soft border-0 bg-gradient-card hover:shadow-medium transition-all duration-300">
                 <CardContent className="p-6 text-center space-y-4">
@@ -79,34 +92,80 @@ const Index = () => {
                   </div>
                   <h3 className="font-semibold">DOCX Files</h3>
                   <p className="text-sm text-muted-foreground">
-                    Repair corrupted Microsoft Word documents and recover your important content.
+                    Advanced Word document repair with content extraction and text preview.
                   </p>
+                  <div className="flex flex-wrap gap-1 justify-center">
+                    <Badge variant="outline" className="text-xs">Text Recovery</Badge>
+                    <Badge variant="outline" className="text-xs">XML Repair</Badge>
+                  </div>
                 </CardContent>
               </Card>
               
               <Card className="shadow-soft border-0 bg-gradient-card hover:shadow-medium transition-all duration-300">
                 <CardContent className="p-6 text-center space-y-4">
                   <div className="p-3 rounded-full bg-accent/10 w-fit mx-auto">
-                    <FileText className="w-6 h-6 text-accent" />
+                    <BarChart3 className="w-6 h-6 text-accent" />
                   </div>
                   <h3 className="font-semibold">XLSX Files</h3>
                   <p className="text-sm text-muted-foreground">
-                    Restore damaged Excel spreadsheets and recover your valuable data.
+                    Excel spreadsheet recovery with worksheet-by-worksheet analysis.
                   </p>
+                  <div className="flex flex-wrap gap-1 justify-center">
+                    <Badge variant="outline" className="text-xs">Sheet Recovery</Badge>
+                    <Badge variant="outline" className="text-xs">Data Validation</Badge>
+                  </div>
                 </CardContent>
               </Card>
               
               <Card className="shadow-soft border-0 bg-gradient-card hover:shadow-medium transition-all duration-300">
                 <CardContent className="p-6 text-center space-y-4">
                   <div className="p-3 rounded-full bg-warning/10 w-fit mx-auto">
-                    <FileText className="w-6 h-6 text-warning" />
+                    <Presentation className="w-6 h-6 text-warning" />
                   </div>
                   <h3 className="font-semibold">PPTX Files</h3>
                   <p className="text-sm text-muted-foreground">
-                    Fix broken PowerPoint presentations and save your slides.
+                    PowerPoint presentation repair with slide counting and structure recovery.
                   </p>
+                  <div className="flex flex-wrap gap-1 justify-center">
+                    <Badge variant="outline" className="text-xs">Slide Recovery</Badge>
+                    <Badge variant="outline" className="text-xs">Structure Repair</Badge>
+                  </div>
                 </CardContent>
               </Card>
+            </div>
+
+            {/* New Features Showcase */}
+            <div className="max-w-4xl mx-auto">
+              <h2 className="text-2xl font-bold text-center mb-8">Enhanced Recovery Features</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <Card className="shadow-soft border-0 bg-gradient-card">
+                  <CardContent className="p-6 space-y-4">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-full bg-primary/10">
+                        <Layers className="w-5 h-5 text-primary" />
+                      </div>
+                      <h3 className="font-semibold">Content Preview</h3>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      See what was recovered before downloading. Preview document text, worksheet names, or slide counts.
+                    </p>
+                  </CardContent>
+                </Card>
+                
+                <Card className="shadow-soft border-0 bg-gradient-card">
+                  <CardContent className="p-6 space-y-4">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-full bg-accent/10">
+                        <BarChart3 className="w-5 h-5 text-accent" />
+                      </div>
+                      <h3 className="font-semibold">Recovery Statistics</h3>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      Detailed breakdown of files recovered vs. corrupted with comprehensive repair reports.
+                    </p>
+                  </CardContent>
+                </Card>
+              </div>
             </div>
           </div>
         ) : (
@@ -119,12 +178,13 @@ const Index = () => {
         <div className="container mx-auto px-4 py-8">
           <div className="text-center space-y-4">
             <p className="text-sm text-muted-foreground">
-              This tool processes files locally in your browser for maximum security and privacy.
+              Enhanced Office file repair with format-specific algorithms and intelligent content recovery.
             </p>
             <div className="flex flex-wrap justify-center gap-2">
+              <Badge variant="outline" className="text-xs">Format-Specific</Badge>
+              <Badge variant="outline" className="text-xs">Content Preview</Badge>
+              <Badge variant="outline" className="text-xs">Recovery Stats</Badge>
               <Badge variant="outline" className="text-xs">Privacy First</Badge>
-              <Badge variant="outline" className="text-xs">No File Upload</Badge>
-              <Badge variant="outline" className="text-xs">Browser Based</Badge>
             </div>
           </div>
         </div>

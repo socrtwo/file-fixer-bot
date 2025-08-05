@@ -543,13 +543,28 @@ async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
   
   console.log(`Found ${localFileHeaders.length} potential file headers`);
   
-  // Step 2: Parse each local file header manually
+  // Step 2: Parse each local file header manually and decompress
   for (const headerOffset of localFileHeaders) {
     try {
       const fileInfo = parseLocalFileHeader(uint8Array, headerOffset);
       if (fileInfo && fileInfo.filename && fileInfo.data) {
-        extractedFiles[fileInfo.filename] = fileInfo.data;
-        console.log(`Recovered file: ${fileInfo.filename} (${fileInfo.data.length} bytes)`);
+        // Handle decompression if needed
+        let finalData = fileInfo.data;
+        
+        if (fileInfo.compressionMethod === 8) {
+          // Deflate compression - attempt decompression
+          try {
+            finalData = await decompressDeflate(fileInfo.data);
+            console.log(`Recovered file: ${fileInfo.filename} (${finalData.length} bytes)`);
+          } catch (error) {
+            console.log(`Keeping compressed data for ${fileInfo.filename} (deflate)`);
+            finalData = fileInfo.data;
+          }
+        } else {
+          console.log(`Recovered file: ${fileInfo.filename} (${finalData.length} bytes)`);
+        }
+        
+        extractedFiles[fileInfo.filename] = finalData;
       }
     } catch (error) {
       console.log(`Failed to parse header at offset ${headerOffset}:`, error.message);
@@ -565,7 +580,7 @@ async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
 }
 
 // Parse ZIP local file header manually (mimics zip -FF behavior)
-function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: string; data: Uint8Array } | null {
+function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: string; data: Uint8Array; compressionMethod: number; compressedSize: number } | null {
   try {
     // Local file header structure:
     // 0-3: signature (0x04034b50)
@@ -616,18 +631,13 @@ function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: str
       fileData = data.slice(dataStart, endOffset);
     }
     
-    // Decompress if needed (only handle stored and deflate)
-    if (compressionMethod === 0) {
-      // Stored (no compression)
-      return { filename, data: fileData };
-    } else if (compressionMethod === 8) {
-      // Deflate compression - keep compressed for now (decompression would require async)
-      console.log(`Keeping compressed data for ${filename} (deflate)`);
-      return { filename, data: fileData };
-    } else {
-      // Unknown compression, keep as-is
-      return { filename, data: fileData };
-    }
+    // Return raw data with compression info for later processing
+    return { 
+      filename, 
+      data: fileData, 
+      compressionMethod, 
+      compressedSize 
+    };
   } catch (error) {
     return null;
   }

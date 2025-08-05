@@ -524,16 +524,20 @@ async function advancedZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> 
 
 async function fallbackZipRepair(arrayBuffer: ArrayBuffer): Promise<Uint8Array> {
   console.log('Using advanced binary ZIP repair (mimicking zip -FF)...');
+  console.log(`Input data size: ${arrayBuffer.byteLength} bytes`);
   
   const uint8Array = new Uint8Array(arrayBuffer);
   const extractedFiles: { [key: string]: Uint8Array } = {};
   
   // Step 1: Scan for ZIP local file header signatures (0x04034b50)
   const localFileHeaders: number[] = [];
+  console.log('Scanning for ZIP signatures...');
+  
   for (let i = 0; i < uint8Array.length - 4; i++) {
     if (uint8Array[i] === 0x50 && uint8Array[i+1] === 0x4b && 
         uint8Array[i+2] === 0x03 && uint8Array[i+3] === 0x04) {
       localFileHeaders.push(i);
+      console.log(`Found ZIP signature at offset ${i}`);
     }
   }
   
@@ -619,7 +623,7 @@ function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: str
     } else if (compressionMethod === 8) {
       // Deflate compression - try to decompress
       try {
-        const decompressed = decompressDeflate(fileData);
+        const decompressed = await decompressDeflate(fileData);
         return { filename, data: decompressed };
       } catch (error) {
         console.log(`Failed to decompress ${filename}, keeping compressed data`);
@@ -635,23 +639,30 @@ function parseLocalFileHeader(data: Uint8Array, offset: number): { filename: str
 }
 
 // Simple deflate decompression using built-in DecompressionStream
-function decompressDeflate(compressedData: Uint8Array): Uint8Array {
+async function decompressDeflate(compressedData: Uint8Array): Promise<Uint8Array> {
   try {
+    console.log(`Attempting to decompress ${compressedData.length} bytes`);
+    
+    // Check if DecompressionStream is available
+    if (typeof DecompressionStream === 'undefined') {
+      console.log('DecompressionStream not available, returning compressed data');
+      return compressedData;
+    }
+    
     const stream = new DecompressionStream('deflate-raw');
     const writer = stream.writable.getWriter();
     const reader = stream.readable.getReader();
     
     // Write compressed data
-    writer.write(compressedData);
-    writer.close();
+    await writer.write(compressedData);
+    await writer.close();
     
     // Read decompressed data
     const chunks: Uint8Array[] = [];
-    let done = false;
     
-    while (!done) {
-      const { value, done: readerDone } = reader.read();
-      done = readerDone;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
       if (value) {
         chunks.push(new Uint8Array(value));
       }
@@ -666,9 +677,11 @@ function decompressDeflate(compressedData: Uint8Array): Uint8Array {
       offset += chunk.length;
     }
     
+    console.log(`Decompressed to ${result.length} bytes`);
     return result;
   } catch (error) {
-    throw new Error(`Decompression failed: ${error.message}`);
+    console.log(`Decompression failed: ${error.message}, returning compressed data`);
+    return compressedData;
   }
 }
 

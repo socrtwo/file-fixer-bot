@@ -1,5 +1,10 @@
 # Welcome to your Lovable project
 
+<!--PAGES_LINK_BANNER-->
+> 🌐 **Live page:** [https://socrtwo.github.io/file-fixer-bot/](https://socrtwo.github.io/file-fixer-bot/)  
+> 📦 **Releases:** [github.com/socrtwo/file-fixer-bot/releases](https://github.com/socrtwo/file-fixer-bot/releases)
+<!--/PAGES_LINK_BANNER-->
+
 ## Project info
 
 **URL**: https://lovable.dev/projects/fd9ca9c6-5649-4eb4-92e6-86d336643aec

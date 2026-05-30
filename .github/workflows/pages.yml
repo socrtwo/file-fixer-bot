@@ -82,7 +82,7 @@ jobs:
           printf 'text-decoration:none;color:#f5f3ff;background:rgba(20,10,40,.55);'
           printf 'border:1px solid rgba(255,255,255,.1);border-radius:14px}'
           printf 'a:hover{border-color:#7c3aed}h1{background:linear-gradient(90deg,#ff2e93,#22d3ee);'
-          printf '-webkit-background-clip:text;-webkit-text-fill-color:transparent}</style></head><body>'
+          printf '%s' '-webkit-background-clip:text;-webkit-text-fill-color:transparent}</style></head><body>'
           printf '<h1>All Versions</h1>'
           printf '<a href="./">Latest (%s)</a><a href="./main/">main</a>' "$current_label"
         } > public/versions.html

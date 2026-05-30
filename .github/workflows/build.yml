@@ -1,0 +1,122 @@
+name: Build file-fixer-bot – All Platforms
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: "22"
+  APP_SLUG: file-fixer-bot
+
+# Allow the release job to create/update GitHub Releases.
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Build Web / PWA bundles for every platform.
+  #
+  # This is a Vite/React web app with NO native shell (no Electron,
+  # no Capacitor). Every platform is therefore shipped as the SAME
+  # installable PWA build:
+  #   • Web      – open in any browser.
+  #   • ChromeOS – install the PWA from Chrome, or run via the web zip.
+  #   • iOS      – Safari → Share → Add to Home Screen.
+  #   • Android  – Chrome → Add to Home Screen (PWA).
+  #   • Windows/macOS/Linux – install the PWA from the browser
+  #     ("Install app" in the address bar) — desktop PWA.
+  # Native desktop/mobile installers are intentionally OMITTED because
+  # the repo has no Electron/Capacitor config to build them from.
+  # ─────────────────────────────────────────────
+  build-web:
+    name: Build Web (PWA – all platforms)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (non-blocking)
+        run: npx tsc --noEmit
+        continue-on-error: true
+
+      - name: Build
+        run: npm run build
+
+      - name: Package PWA bundles (Web / ChromeOS / iOS / Android / Desktop)
+        run: |
+          SLUG="${APP_SLUG}"
+          ( cd dist && zip -r "../${SLUG}-web.zip" . )
+
+          printf '%s for ChromeOS\n\nOpen the live app in Chrome and use\n"Install %s" from the address bar, or unzip and serve these files.\n' "$SLUG" "$SLUG" > INSTALL-chromeos.txt
+          cp "${SLUG}-web.zip" "${SLUG}-chromeos.zip" && zip -j "${SLUG}-chromeos.zip" INSTALL-chromeos.txt
+
+          printf '%s for iOS / iPadOS\n\nOpen the live app in Safari, then\nShare -> Add to Home Screen to install (PWA).\n' "$SLUG" > INSTALL-ios.txt
+          cp "${SLUG}-web.zip" "${SLUG}-ios.zip" && zip -j "${SLUG}-ios.zip" INSTALL-ios.txt
+
+          printf '%s for Android\n\nOpen the live app in Chrome, then\nMenu -> Add to Home Screen / Install app (PWA).\n' "$SLUG" > INSTALL-android.txt
+          cp "${SLUG}-web.zip" "${SLUG}-android.zip" && zip -j "${SLUG}-android.zip" INSTALL-android.txt
+
+          printf '%s for Windows / macOS / Linux\n\nOpen the live app in Chrome/Edge and use the\n"Install app" button in the address bar (desktop PWA),\nor unzip and serve these files locally.\n' "$SLUG" > INSTALL-desktop.txt
+          cp "${SLUG}-web.zip" "${SLUG}-desktop.zip" && zip -j "${SLUG}-desktop.zip" INSTALL-desktop.txt
+
+      - name: Upload PWA bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_SLUG }}-pwa-bundles
+          path: |
+            ${{ env.APP_SLUG }}-web.zip
+            ${{ env.APP_SLUG }}-chromeos.zip
+            ${{ env.APP_SLUG }}-ios.zip
+            ${{ env.APP_SLUG }}-android.zip
+            ${{ env.APP_SLUG }}-desktop.zip
+          retention-days: 30
+
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist
+
+  # ─────────────────────────────────────────────
+  # Create GitHub Release (on v* tags or manual dispatch).
+  # Publishes the per-platform PWA bundles as release assets.
+  # ─────────────────────────────────────────────
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    needs: [build-web]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List downloaded artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: false
